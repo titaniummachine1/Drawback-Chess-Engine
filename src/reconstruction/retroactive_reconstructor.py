@@ -124,26 +124,53 @@ class FairyStockfishInterface:
         self._send_command(f"position fen {fen}")
     
     def get_legal_moves(self, fen: str, drawback: Optional[str] = None) -> List[str]:
-        """Get legal moves for a position with optional drawback."""
+        """Get legal moves for a position using perft 1 command."""
         if self.process is None:
             self.start_engine()
         
         # Set position
         self.set_position(fen)
         
-        # Apply drawback if specified
-        if drawback:
-            # This would depend on Fairy-Stockfish's drawback implementation
-            # For now, we'll simulate by filtering moves
-            pass
+        # Get base moves using perft 1
+        base_moves = self._get_perft_moves()
         
-        # Get legal moves
-        self._send_command("go perft 1")
+        # Apply drawback filter if specified
+        if drawback is None:
+            return base_moves
+        else:
+            return self._apply_drawback_filter(fen, base_moves, drawback, self._get_player_from_fen(fen))
+    
+    def _get_perft_moves(self) -> List[str]:
+        """Get all moves using perft 1 command."""
+        # Clear any previous output
+        self._clear_engine_output()
         
-        # Parse perft output to extract legal moves
-        legal_moves = self._parse_perft_output()
+        # Send perft 1 command
+        self._send_command("perft 1")
         
-        return legal_moves
+        # Parse perft output
+        moves = self._parse_perft_output()
+        return moves
+    
+    def _clear_engine_output(self):
+        """Clear any pending output from engine."""
+        if self.process and self.process.stdout.readable():
+            # Read and discard any pending output
+            while True:
+                try:
+                    line = self.process.stdout.readline(timeout=0.01)
+                    if not line:
+                        break
+                except:
+                    break
+    
+    def _get_player_from_fen(self, fen: str) -> str:
+        """Extract current player from FEN."""
+        try:
+            fen_parts = fen.split()
+            return "white" if fen_parts[1] == 'w' else "black"
+        except (IndexError, ValueError):
+            return "white"  # Default to white
     
     def _parse_perft_output(self) -> List[str]:
         """Parse perft output to extract legal moves."""
@@ -151,22 +178,74 @@ class FairyStockfishInterface:
         
         # Read output until we get the perft result
         start_time = time.time()
-        while time.time() - start_time < 2.0:  # 2 second timeout
-            if self.process.stdout.readable():
-                line = self.process.stdout.readline()
-                if line:
+        while time.time() - start_time < 3.0:  # 3 second timeout
+            if self.process and self.process.stdout.readable():
+                try:
+                    line = self.process.stdout.readline()
+                    if not line:
+                        break
+                    
                     line = line.strip()
+                    
+                    # Look for the final perft result line
                     if line.startswith("nodes searched"):
                         break
+                    elif line.startswith("info") or line.startswith("Nodes"):
+                        continue  # Skip info lines
                     elif ":" in line and not line.startswith("info"):
-                        # This looks like a move:count line
-                        move_part = line.split(":")[0].strip()
-                        if move_part and len(move_part) >= 4:
-                            moves.append(move_part)
+                        # This looks like a move:count line from perft
+                        # Format: "e2e4: 1" or "e2e4 1"
+                        parts = line.split(":")
+                        if len(parts) == 2:
+                            move_part = parts[0].strip()
+                            count_part = parts[1].strip()
+                        else:
+                            # Alternative format: "e2e4 1"
+                            parts = line.split()
+                            if len(parts) >= 2:
+                                move_part = parts[0].strip()
+                                count_part = parts[1].strip()
+                            else:
+                                continue
+                        
+                        # Validate move format (should be 4-6 characters)
+                        if len(move_part) >= 4 and len(move_part) <= 6:
+                            # Ensure it's a valid UCI move
+                            if self._is_valid_uci_move(move_part):
+                                moves.append(move_part)
+                
+                except Exception as e:
+                    print(f"Error reading perft output: {e}")
+                    continue
             
             time.sleep(0.01)
         
+        # Sort moves for consistency
+        moves.sort()
         return moves
+    
+    def _is_valid_uci_move(self, move: str) -> bool:
+        """Validate if a string is a valid UCI move."""
+        if len(move) < 4 or len(move) > 6:
+            return False
+        
+        # Check if it follows UCI format (file+rank to file+rank, optional promotion)
+        if len(move) >= 4:
+            # Source square
+            if not (move[0] in 'abcdefgh' and move[1] in '12345678'):
+                return False
+            # Destination square
+            if not (move[2] in 'abcdefgh' and move[3] in '12345678'):
+                return False
+            # Optional promotion piece
+            if len(move) == 5:
+                if move[4] not in 'nbrq':
+                    return False
+            elif len(move) == 6:
+                if move[4:6] not in ['nb', 'nr', 'nq', 'bb', 'br', 'bq', 'rb', 'rr', 'rq', 'qb', 'qr', 'qq']:
+                    return False
+        
+        return True
     
     def stop_engine(self):
         """Stop the Fairy-Stockfish engine."""
