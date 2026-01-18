@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
 from .embedded_path import get_embedded_engine_path
+from .drawback_bridge import DrawbackBridge
 
 
 @dataclass
@@ -37,6 +38,9 @@ class FairyStockfishInterface:
         self.variant = variant
         self.process = None
         self.is_initialized = False
+        
+        # Initialize Drawback bridge for special rules
+        self.drawback_bridge = DrawbackBridge()
         
         # Performance tracking
         self.total_queries = 0
@@ -80,31 +84,39 @@ class FairyStockfishInterface:
         except Exception as e:
             raise RuntimeError(f"Failed to start Fairy-Stockfish: {e}")
     
-    def get_base_moves(self, fen: str) -> MoveGenerationResult:
+    def get_base_moves(self, fen: str, previous_move: Optional[str] = None) -> MoveGenerationResult:
         """
         Get base moves using perft 1 command - the core of the pipeline.
         
-        This is thousands of times faster than Python libraries.
-        
         Args:
-            fen: FEN string of the position
+            fen: FEN string of the position (empty string or None for default)
+            previous_move: The move just played (for king capture en passant context)
             
         Returns:
-            MoveGenerationResult with all pseudo-legal moves
+            MoveGenerationResult with base moves including Drawback Chess rules
         """
-        if not self.is_initialized:
+        if self.process is None:
             self.start_engine()
         
         start_time = time.time()
         
-        # Set position in engine
-        self._send_command(f"position fen {fen}")
+        # Set position (use Fairy-Stockfish built-in default if fen is empty or None)
+        if fen and fen.strip():
+            self._send_command(f"position fen {fen.strip()}")
+            actual_fen = fen.strip()
+        else:
+            # Use Fairy-Stockfish built-in default starting position
+            self._send_command("position startpos")
+            actual_fen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"  # Standard starting position
         
-        # Get moves using perft 1 (the magic command!)
-        moves = self._execute_perft_1()
+        # Get base moves using perft 1
+        base_moves = self._execute_perft_1()
+        
+        # Apply Drawback Chess-specific rules via the bridge
+        enhanced_moves = self.drawback_bridge.apply_drawback_rules(base_moves, actual_fen, previous_move)
         
         # Extract player from FEN
-        player = self._extract_player_from_fen(fen)
+        player = self._extract_player_from_fen(actual_fen)
         
         # Track performance
         generation_time = (time.time() - start_time) * 1000
@@ -112,11 +124,29 @@ class FairyStockfishInterface:
         self.total_time_ms += generation_time
         
         return MoveGenerationResult(
-            base_moves=moves,
-            position_fen=fen,
+            base_moves=enhanced_moves,
+            position_fen=actual_fen,
             player_to_move=player,
             generation_time_ms=generation_time
         )
+    
+    def get_current_fen(self) -> str:
+        """Get the current FEN from the engine."""
+        self._send_command("d")  # 'd' command in stockfish displays board + FEN
+        response = self._wait_for_response("Fen:", timeout=2.0)
+        for line in response.split('\n'):
+            if line.startswith("Fen:"):
+                return line.replace("Fen:", "").strip()
+        return ""
+
+    def make_moves(self, start_fen: str, moves: List[str]) -> str:
+        """Apply a sequence of moves to a FEN and return the resulting FEN."""
+        if not moves:
+            return start_fen
+            
+        cmd = f"position fen {start_fen} moves {' '.join(moves)}"
+        self._send_command(cmd)
+        return self.get_current_fen()
     
     def _execute_perft_1(self) -> List[str]:
         """Execute perft 1 and parse moves - the heart of the system."""
@@ -309,11 +339,19 @@ def create_fairy_interface(stockfish_path: str = None) -> FairyStockfishInterfac
     return FairyStockfishInterface(stockfish_path)
 
 
-def get_base_moves_fast(fen: str, stockfish_path: str = None) -> List[str]:
+def get_base_moves_fast(fen: str, stockfish_path: str = None, previous_move: Optional[str] = None) -> List[str]:
     """
     Fast function to get base moves - core of the subtractive mask pipeline.
     
     Falls back to python-chess if Fairy-Stockfish is not available.
+    
+    Args:
+        fen: FEN string of the position
+        stockfish_path: Path to Fairy-Stockfish executable (optional)
+        previous_move: The move just played (for king capture en passant)
+        
+    Returns:
+        List of legal moves including Drawback Chess rules
     """
     try:
         if stockfish_path is None:
@@ -321,7 +359,7 @@ def get_base_moves_fast(fen: str, stockfish_path: str = None) -> List[str]:
             stockfish_path = get_embedded_engine_path()
         
         with create_fairy_interface(stockfish_path) as fs:
-            result = fs.get_base_moves(fen)
+            result = fs.get_base_moves(fen, previous_move)
             return result.base_moves
     except Exception as e:
         print(f"Fairy-Stockfish not available ({e}), using fallback")

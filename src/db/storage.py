@@ -10,7 +10,7 @@ from datetime import datetime
 from typing import List, Dict, Any, Optional, Iterator
 from dataclasses import dataclass
 
-from .minimal_models import Base, Game, Position, Drawback
+from .models import Base, Game, Position, Drawback
 from .database import get_database
 
 
@@ -21,15 +21,18 @@ class MinimalGame:
     result: Optional[str]
     opponent_type: str
     engine_version: str
+    white_drawback: Optional[str]
+    black_drawback: Optional[str]
     positions: List['MinimalPosition']
     drawbacks: List['MinimalDrawback']
 
 
 @dataclass
 class MinimalPosition:
-    """Position with FEN and legal moves."""
+    """Position with FEN, move played, and legal moves."""
     move_number: int
     fen: str
+    move_uci: Optional[str]
     legal_moves: List[str]
 
 
@@ -38,17 +41,18 @@ class MinimalDrawback:
     """Drawback detection data."""
     position_move_number: int
     drawback_type: str
+    drawback_description: Optional[str]
     severity: float
     legal_moves_available: List[str]
     metadata: Dict[str, Any]  # Additional data like affected pieces, threat squares
 
 
-class MinimalStorage:
+class Storage:
     """Ultra-minimal storage system for chess games."""
     
     def __init__(self):
         self.db = get_database()
-        # Use minimal models
+        # Use models
         Base.metadata.create_all(bind=self.db.engine)
     
     def store_game(self, game_data: MinimalGame) -> int:
@@ -68,6 +72,8 @@ class MinimalStorage:
                 result=game_data.result,
                 opponent_type=game_data.opponent_type,
                 engine_version=game_data.engine_version,
+                white_drawback=game_data.white_drawback,
+                black_drawback=game_data.black_drawback,
                 total_moves=len(game_data.positions)
             )
             session.add(game)
@@ -81,6 +87,7 @@ class MinimalStorage:
                     game_id=game_id,
                     move_number=pos.move_number,
                     fen=pos.fen,
+                    move_uci=pos.move_uci,
                     legal_moves=pos.legal_moves  # Will be auto-serialized
                 )
                 session.add(position)
@@ -103,6 +110,7 @@ class MinimalStorage:
                     game_id=game_id,
                     position_id=position_id,
                     drawback_type=drawback.drawback_type,
+                    drawback_description=drawback.drawback_description,
                     severity=drawback.severity,
                     legal_moves_response=response_data  # Will be auto-serialized
                 )
@@ -133,6 +141,7 @@ class MinimalStorage:
                 MinimalPosition(
                     move_number=pos.move_number,
                     fen=pos.fen,
+                    move_uci=pos.move_uci,
                     legal_moves=pos.get_legal_moves()
                 )
                 for pos in positions
@@ -142,6 +151,7 @@ class MinimalStorage:
                 MinimalDrawback(
                     position_move_number=drawback.position.move_number,
                     drawback_type=drawback.drawback_type,
+                    drawback_description=drawback.drawback_description,
                     severity=drawback.severity,
                     legal_moves_available=drawback.get_legal_moves_response().get("legal_moves", []),
                     metadata={k: v for k, v in drawback.get_legal_moves_response().items() if k != "legal_moves"}
@@ -154,16 +164,36 @@ class MinimalStorage:
                 result=game.result,
                 opponent_type=game.opponent_type or "unknown",
                 engine_version=game.engine_version or "unknown",
+                white_drawback=game.white_drawback,
+                black_drawback=game.black_drawback,
                 positions=minimal_positions,
                 drawbacks=minimal_drawbacks
             )
     
+    def get_game_history(self, position_id: int) -> List[str]:
+        """Get the list of UCI moves from the start of the game up to (but not including) this position."""
+        with self.db.get_session() as session:
+            # 1. Get the game_id and move_number for this position
+            pos = session.query(Position).filter(Position.id == position_id).first()
+            if not pos:
+                return []
+                
+            # 2. Get all previous positions in the same game
+            history_moves = session.query(Position.move_uci).filter(
+                Position.game_id == pos.game_id,
+                Position.move_number < pos.move_number
+            ).order_by(Position.move_number).all()
+            
+            # 3. Filter out None moves (start position) and extract strings
+            return [move[0] for move in history_moves if move[0]]
+
     def get_training_positions(self, limit: int = 10000, 
-                             with_drawbacks_only: bool = False) -> Iterator[tuple]:
+                             with_drawbacks_only: bool = False,
+                             include_history: bool = True) -> Iterator[tuple]:
         """
         Get positions for training.
         
-        Yields tuples of (fen, legal_moves, drawback_info)
+        Yields tuples of (fen, legal_moves, drawback_info, result, move_history)
         """
         with self.db.get_session() as session:
             query = session.query(Position, Game.result)
@@ -183,11 +213,16 @@ class MinimalStorage:
                 if drawback:
                     drawback_info = {
                         "type": drawback.drawback_type,
+                        "description": drawback.drawback_description,
                         "severity": drawback.severity,
                         "legal_moves_response": drawback.get_legal_moves_response()
                     }
                 
-                yield (position.fen, position.get_legal_moves(), drawback_info, result)
+                history = []
+                if include_history:
+                    history = self.get_game_history(position.id)
+                
+                yield (position.fen, position.get_legal_moves(), drawback_info, result, history)
     
     def get_drawback_training_data(self, min_severity: float = 0.5) -> List[Dict[str, Any]]:
         """Get all drawback data for training."""
@@ -202,6 +237,7 @@ class MinimalStorage:
                     "fen": fen,
                     "legal_moves": json.loads(legal_moves),
                     "drawback_type": drawback.drawback_type,
+                    "drawback_description": drawback.drawback_description,
                     "severity": drawback.severity,
                     "response_data": drawback.get_legal_moves_response()
                 })
@@ -293,13 +329,13 @@ class MinimalStorage:
             session.commit()
 
 
-# Global minimal storage instance
-_minimal_storage: Optional[MinimalStorage] = None
+# Global storage instance
+_storage: Optional[Storage] = None
 
 
-def get_minimal_storage() -> MinimalStorage:
-    """Get the global minimal storage instance."""
-    global _minimal_storage
-    if _minimal_storage is None:
-        _minimal_storage = MinimalStorage()
-    return _minimal_storage
+def get_storage() -> Storage:
+    """Get the global storage instance."""
+    global _storage
+    if _storage is None:
+        _storage = Storage()
+    return _storage

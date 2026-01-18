@@ -1,4 +1,4 @@
-# Minimal Database Schema for Drawback Chess Engine
+# Database Schema for Drawback Chess Engine
 
 ## Philosophy
 
@@ -21,6 +21,8 @@ CREATE TABLE games (
     result TEXT,                              -- 'white_win', 'black_win', 'draw'
     opponent_type TEXT,                        -- 'human', 'engine', 'self_play'
     engine_version TEXT,
+    white_drawback TEXT,                       -- e.g., 'Knight_Immobility'
+    black_drawback TEXT,                       -- e.g., 'No_Castling'
     total_moves INTEGER,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -36,6 +38,7 @@ CREATE TABLE positions (
     game_id INTEGER NOT NULL,
     move_number INTEGER NOT NULL,
     fen TEXT NOT NULL,                        -- Position state
+    move_uci TEXT,                            -- The move played (e.g. 'e2e4')
     legal_moves TEXT NOT NULL,                 -- JSON: list of legal UCI moves
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY (game_id) REFERENCES games (id),
@@ -52,7 +55,8 @@ CREATE TABLE drawbacks (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     game_id INTEGER NOT NULL,
     position_id INTEGER NOT NULL,
-    drawback_type TEXT NOT NULL,               -- 'fork', 'pin', 'skewer', etc.
+    drawback_type TEXT NOT NULL,               -- 'Knight_Immobility', 'Queen_Capture_Ban', etc.
+    drawback_description TEXT,                  -- Human readable: 'Knights cannot move'
     severity REAL DEFAULT 0.0,                 -- 0.0 to 1.0
     legal_moves_response TEXT NOT NULL,       -- JSON: legal moves available when drawback detected
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,

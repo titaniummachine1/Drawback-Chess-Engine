@@ -14,6 +14,7 @@ from pathlib import Path
 from dataclasses import dataclass
 
 from ..recording.game_recorder import GameRecord, GameMove, get_recorder
+from ..db.storage import get_storage, MinimalGame, MinimalPosition, MinimalDrawback
 
 
 @dataclass
@@ -268,6 +269,7 @@ class RetroactiveReconstructor:
         """Initialize reconstructor."""
         self.stockfish = FairyStockfishInterface(stockfish_path)
         self.recorder = get_recorder()
+        self.storage = get_storage()
     
     def reconstruct_game(self, game_record: GameRecord) -> ReconstructedGame:
         """
@@ -325,14 +327,41 @@ class RetroactiveReconstructor:
                 
                 training_samples.append(sample)
                 
-                # Update position for next move
-                current_fen = self._apply_move_to_fen(current_fen, move_played)
+                # Update position for next move using engine
+                current_fen = self.stockfish.make_moves(current_fen, [move_played])
         
-        return ReconstructedGame(
+        reconstructed = ReconstructedGame(
             game_id=game_record.game_id,
             meta=meta,
             training_samples=training_samples
         )
+        
+        # SAVE TO DATABASE
+        self._save_to_database(reconstructed)
+        
+        return reconstructed
+
+    def _save_to_database(self, game: ReconstructedGame):
+        """Save reconstructed game to the unified database."""
+        db_game = MinimalGame(
+            uuid=game.game_id,
+            result=game.meta.get('result'),
+            opponent_type=game.meta.get('game_type', 'unknown'),
+            engine_version="reconstructed",
+            white_drawback=game.meta.get('white_drawback'),
+            black_drawback=game.meta.get('black_drawback'),
+            positions=[
+                MinimalPosition(
+                    move_number=p.ply,
+                    fen=p.fen,
+                    move_uci=p.move_played,
+                    legal_moves=p.legal_moves
+                ) for p in game.training_samples
+            ],
+            drawbacks=[] # Populate if specific detections exist
+        )
+        self.storage.store_game(db_game)
+        print(f"Saved game {game.game_id} to database")
     
     def _reconstruct_position(self, fen: str, player: str, 
                             drawback: Optional[str]) -> Tuple[List[str], List[str], List[int]]:

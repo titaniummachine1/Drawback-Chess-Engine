@@ -9,8 +9,10 @@ import numpy as np
 from typing import List, Dict, Any, Iterator, Tuple
 from dataclasses import dataclass
 
-from .minimal_storage import get_minimal_storage
+from .storage import get_storage
 from ..engine.chess_engine import GameState
+from ..utils.chess_utils import fen_to_tensor, create_legality_mask, move_to_index
+import torch
 
 
 @dataclass
@@ -25,13 +27,40 @@ class TrainingSample:
     position_value: float  # Calculated from game result
     move_probabilities: Dict[str, float]  # Calculated from game outcome
     legal_moves_mask: Dict[str, bool]
+    move_history: List[str] = None
+    drawback_description: Optional[str] = None
+    metadata: Dict[str, Any] = None
+    
+    def to_neural_batch(self) -> Dict[str, torch.Tensor]:
+        """Convert sample to torch tensors for training."""
+        batch = {
+            "board": fen_to_tensor(self.fen),
+            "legality_mask": create_legality_mask(self.legal_moves),
+            "move_played_idx": torch.tensor(move_to_index(self.move_probabilities.get("actual", "") or ""), dtype=torch.long),
+            "value": torch.tensor([self.position_value], dtype=torch.float32)
+        }
+        
+        # Add history encoding if available
+        if self.move_history is not None:
+            batch["history"] = encode_move_history(self.move_history)
+            
+        # Add text description context if available
+        # (This would be converted to a 384D vector before feeding into the model)
+        if self.drawback_description:
+            batch["drawback_text"] = self.drawback_description
+            
+        # Add random state features for non-deterministic drawbacks
+        if self.metadata and "current_drawback_state" in self.metadata:
+            batch["random_state"] = torch.tensor(self.metadata["current_drawback_state"], dtype=torch.float32)
+
+        return batch
 
 
 class TrainingExtractor:
     """Extracts training data from minimal storage."""
     
     def __init__(self):
-        self.storage = get_minimal_storage()
+        self.storage = get_storage()
     
     def extract_training_samples(self, limit: int = 10000, 
                                with_drawbacks_only: bool = False) -> Iterator[TrainingSample]:
@@ -62,6 +91,7 @@ class TrainingExtractor:
             # Extract drawback info
             has_drawback = drawback_info is not None
             drawback_type = drawback_info.get("type") if drawback_info else None
+            drawback_desc = drawback_info.get("description") if drawback_info else None
             drawback_severity = drawback_info.get("severity", 0.0) if drawback_info else 0.0
             
             yield TrainingSample(
@@ -70,10 +100,13 @@ class TrainingExtractor:
                 game_result=result or "unknown",
                 has_drawback=has_drawback,
                 drawback_type=drawback_type,
+                drawback_description=drawback_desc,
                 drawback_severity=drawback_severity,
                 position_value=position_value,
                 move_probabilities=move_probabilities,
-                legal_moves_mask=legal_moves_mask
+                legal_moves_mask=legal_moves_mask,
+                move_history=history,
+                metadata=drawback_info.get("legal_moves_response", {}) if drawback_info else {}
             )
     
     def extract_drawback_samples(self, min_severity: float = 0.5) -> List[TrainingSample]:

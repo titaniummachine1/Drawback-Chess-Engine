@@ -11,166 +11,113 @@ import torch.nn.functional as F
 import numpy as np
 from typing import Dict, List, Tuple, Optional
 
+from ..utils.chess_utils import fen_to_tensor, move_to_index, encode_move_history
+
+
+class ResBlock(nn.Module):
+    """Classic Residual Block for Chess Board processing."""
+    def __init__(self, channels: int):
+        super().__init__()
+        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm2d(channels)
+        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm2d(channels)
+
+    def forward(self, x):
+        residual = x
+        out = F.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        out += residual
+        return F.relu(out)
+
 
 class ChessBoardEncoder(nn.Module):
-    """Encodes chess board state into tensor representation."""
+    """Subtractive Backbone: ResNet-10 for 'Toaster' hardware."""
     
-    def __init__(self, board_size: int = 8, piece_types: int = 12):
+    def __init__(self, boards: int = 14, filters: int = 128):
         super().__init__()
-        self.board_size = board_size
-        self.piece_types = piece_types
+        # Initial projection
+        self.conv_in = nn.Conv2d(boards, filters, kernel_size=3, padding=1)
+        self.bn_in = nn.BatchNorm2d(filters)
         
-        # Convolutional layers for board pattern recognition
-        self.conv1 = nn.Conv2d(piece_types, 64, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv2d(64, 128, kernel_size=3, padding=1)
-        self.conv3 = nn.Conv2d(128, 256, kernel_size=3, padding=1)
+        # 5 ResBlocks (each has 2 convs = total 10 layers)
+        self.blocks = nn.Sequential(*[ResBlock(filters) for _ in range(5)])
         
-        # Additional features (castling rights, en passant, etc.)
-        self.additional_features = nn.Linear(10, 32)  # 10 additional features
-        
-        # Final board representation
-        self.board_repr = nn.Linear(256 * board_size * board_size + 32, 512)
-    
-    def encode_fen(self, fen: str) -> torch.Tensor:
-        """Encode FEN to board tensor (simplified implementation)."""
-        # This is a placeholder - proper implementation would parse FEN
-        # and create proper piece placement tensors
-        
-        # For now, create a random tensor based on FEN hash
-        board_tensor = torch.zeros(self.piece_types, self.board_size, self.board_size)
-        
-        # Simple hash-based encoding (replace with proper FEN parsing)
-        fen_hash = hash(fen) % (self.piece_types * self.board_size * self.board_size)
-        piece_type = fen_hash // (self.board_size * self.board_size)
-        square = fen_hash % (self.board_size * self.board_size)
-        row = square // self.board_size
-        col = square % self.board_size
-        
-        board_tensor[piece_type, row, col] = 1.0
-        
-        return board_tensor
-    
-    def extract_additional_features(self, fen: str) -> torch.Tensor:
-        """Extract additional features from FEN."""
-        # Parse FEN for castling rights, en passant, etc.
-        features = torch.zeros(10)
-        
-        try:
-            fen_parts = fen.split()
-            if len(fen_parts) >= 3:
-                # Castling rights
-                castling = fen_parts[2]
-                features[0] = 1.0 if 'K' in castling else 0.0  # White king-side
-                features[1] = 1.0 if 'Q' in castling else 0.0  # White queen-side
-                features[2] = 1.0 if 'k' in castling else 0.0  # Black king-side
-                features[3] = 1.0 if 'q' in castling else 0.0  # Black queen-side
-                
-                # En passant
-                if len(fen_parts) >= 4 and fen_parts[3] != '-':
-                    features[4] = 1.0
-                
-                # Side to move
-                if len(fen_parts) >= 1:
-                    features[5] = 1.0 if fen_parts[1] == 'w' else 0.0
-                
-                # Move counters (normalized)
-                if len(fen_parts) >= 6:
-                    halfmove = int(fen_parts[4]) / 100.0  # Normalize
-                    fullmove = int(fen_parts[5]) / 100.0  # Normalize
-                    features[6] = min(halfmove, 1.0)
-                    features[7] = min(fullmove / 100.0, 1.0)
-        except (ValueError, IndexError):
-            pass  # Use default zeros if parsing fails
-        
-        return features
+        # Compression for heads
+        self.pool = nn.AdaptiveAvgPool2d((1, 1)) # Global average pooling
+        self.flatten = nn.Flatten()
+        self.repr_layer = nn.Linear(filters, 512)
     
     def forward(self, fen: str) -> torch.Tensor:
-        """Encode FEN to board representation."""
-        # Encode board
-        board_tensor = self.encode_fen(fen)
-        board_tensor = board_tensor.unsqueeze(0)  # Add batch dimension
+        # 1. Convert FEN to Bitplanes [14, 8, 8]
+        # (Using the real converter from utils)
+        board_tensor = fen_to_tensor(fen).unsqueeze(0) # [1, 14, 8, 8]
         
-        # Convolutional layers
-        x = F.relu(self.conv1(board_tensor))
-        x = F.relu(self.conv2(x))
-        x = F.relu(self.conv3(x))
+        # 2. Pass through ResNet
+        x = F.relu(self.bn_in(self.conv_in(board_tensor)))
+        x = self.blocks(x)
         
-        # Flatten
-        x = x.view(x.size(0), -1)
-        
-        # Additional features
-        additional = self.extract_additional_features(fen)
-        additional = self.additional_features(additional)
-        
-        # Concatenate and final representation
-        x = torch.cat([x, additional], dim=1)
-        board_repr = F.relu(self.board_repr(x))
-        
-        return board_repr
+        # 3. Global feature vector
+        x = self.pool(x)
+        x = self.flatten(x)
+        return F.relu(self.repr_layer(x))
 
 
 class PhysicsEngineHead(nn.Module):
-    """Head A: Physics Engine - learns which moves are illegal given a drawback."""
+    """
+    Head A: The Masker
+    Predicts legality % for 4096 moves from [Board + DrawbackVector + RandomState].
+    """
     
-    def __init__(self, board_repr_size: int = 512, max_moves: int = 218):
+    def __init__(self, board_repr_size: int = 512, text_vec_size: int = 384):
         super().__init__()
-        self.max_moves = max_moves
+        # Input: Board Repr (512) + Text Vector (384) + Random State (16)
+        # Random State is for non-deterministic drawbacks like "Color pick"
+        self.physics_fc = nn.Sequential(
+            nn.Linear(board_repr_size + text_vec_size + 16, 512),
+            nn.ReLU(),
+            nn.Linear(512, 1024),
+            nn.ReLU(),
+            nn.Linear(1024, 4096) # Policy-style output matching 4096 move indices
+        )
         
-        # Process board representation + drawback
-        self.drawback_embedding = nn.Embedding(20, 32)  # 20 drawback types
-        self.physics_fc1 = nn.Linear(board_repr_size + 32, 256)
-        self.physics_fc2 = nn.Linear(256, 128)
-        self.physics_output = nn.Linear(128, max_moves)  # Legality probabilities
+    def forward(self, board_repr: torch.Tensor, text_vec: torch.Tensor, 
+                random_state: Optional[torch.Tensor] = None) -> torch.Tensor:
+        if random_state is None:
+            random_state = torch.zeros(board_repr.size(0), 16, device=board_repr.device)
+            
+        # Concatenate all inputs
+        x = torch.cat([board_repr, text_vec, random_state], dim=1)
         
-    def forward(self, board_repr: torch.Tensor, drawback_ids: torch.Tensor) -> torch.Tensor:
-        """Predict legality mask for moves."""
-        # Embed drawback
-        drawback_emb = self.drawback_embedding(drawback_ids)
-        
-        # Combine board representation with drawback
-        x = torch.cat([board_repr, drawback_emb], dim=1)
-        
-        # Process through network
-        x = F.relu(self.physics_fc1(x))
-        x = F.relu(self.physics_fc2(x))
-        
-        # Output legality probabilities
-        legality_logits = self.physics_output(x)
-        legality_probs = torch.sigmoid(legality_logits)
-        
-        return legality_probs
+        # Sigmoid for % probability (0 = Illegal, 1 = Legal)
+        return torch.sigmoid(self.physics_fc(x))
 
 
 class DetectiveHead(nn.Module):
-    """Head B: Detective - guesses opponent's drawback from move history."""
+    """
+    Head B: The Guesser
+    Guesses the 'Drawback Latent Vector' from move history.
+    """
     
-    def __init__(self, board_repr_size: int = 512, max_history: int = 10, drawback_types: int = 10):
+    def __init__(self, board_repr_size: int = 512, latent_dim: int = 384):
         super().__init__()
-        self.max_history = max_history
-        self.drawback_types = drawback_types
-        
-        # Process board representation
-        self.detective_fc1 = nn.Linear(board_repr_size, 256)
-        
-        # Process move history (simplified - would use proper move encoding)
-        self.move_embedding = nn.Embedding(max_history * 2, 64)  # Move encoding
-        
-        # Combine board + history for drawback prediction
-        self.combined_fc1 = nn.Linear(256 + 64, 128)
-        self.combined_fc2 = nn.Linear(128, 64)
-        self.drawback_output = nn.Linear(64, drawback_types)  # Drawback probabilities
+        # Simplified: LSTM/GRU over encoded move history
+        self.history_gru = nn.GRU(64, 256, batch_first=True)
+        self.fc = nn.Sequential(
+            nn.Linear(256 + board_repr_size, 512),
+            nn.ReLU(),
+            nn.Linear(512, latent_dim) # Predict the 384D embedding
+        )
         
     def encode_move_history(self, move_history: List[str]) -> torch.Tensor:
-        """Encode move history (simplified)."""
-        # This is a placeholder - proper implementation would use
-        # sophisticated move encoding with piece types, squares, etc.
-        
+        """Encode move history using UCI indices."""
+        # Use only the last move for the embedding head (simplified)
+        # In a real model, this would be an LSTM/Transformer over the history tensor
         if not move_history:
             return torch.zeros(64)
-        
-        # Simple hash-based encoding for demonstration
-        move_hash = hash(str(move_history)) % (self.max_history * 2)
-        move_tensor = torch.tensor([move_hash], dtype=torch.long)
+            
+        last_move_idx = move_to_index(move_history[-1])
+        move_tensor = torch.tensor([last_move_idx % (self.max_history * 2)], dtype=torch.long)
         
         return self.move_embedding(move_tensor).squeeze(0)
     
@@ -250,6 +197,30 @@ class TwoHeadChessModel(nn.Module):
         """Predict opponent's drawback from move history."""
         board_repr = self.board_encoder(fen)
         return self.detective_head(board_repr, move_history)
+
+    def predict_legality_from_history(self, fen: str, move_history: List[str], 
+                                     random_state: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Subtractive Head Inference (Unkown Opponent Drawback):
+        1. Board Encoder processes FEN.
+        2. Detective Head analyzes history to guess the Latent Drawback Vector (384D).
+        3. Physics Head uses that Vector to predict illegal moves in a single pass.
+        """
+        board_repr = self.board_encoder(fen)
+        
+        # 1. Guess the drawback vector
+        latent_drawback_vec = self.detective_head(board_repr, move_history)
+        
+        # 2. Apply physics mask using the guessed vector
+        legality_mask = self.physics_head(board_repr, latent_drawback_vec, random_state)
+        
+        return legality_mask
+
+    def predict_legality_known_drawback(self, fen: str, drawback_text_vec: torch.Tensor,
+                                       random_state: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """Prediction for when the drawback is known (e.g., our own turn)."""
+        board_repr = self.board_encoder(fen)
+        return self.physics_head(board_repr, drawback_text_vec, random_state)
 
 
 class TwoHeadTrainer:
