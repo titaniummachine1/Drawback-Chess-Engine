@@ -303,10 +303,19 @@ def create_fairy_interface(stockfish_path: str = "stockfish") -> FairyStockfishI
 
 
 def get_base_moves_fast(fen: str, stockfish_path: str = "stockfish") -> List[str]:
-    """Fast function to get base moves - core of the subtractive mask pipeline."""
-    with create_fairy_interface(stockfish_path) as fs:
-        result = fs.get_base_moves(fen)
-        return result.base_moves
+    """
+    Fast function to get base moves - core of the subtractive mask pipeline.
+    
+    Falls back to python-chess if Fairy-Stockfish is not available.
+    """
+    try:
+        with create_fairy_interface(stockfish_path) as fs:
+            result = fs.get_base_moves(fen)
+            return result.base_moves
+    except Exception as e:
+        print(f"Fairy-Stockfish not available ({e}), using fallback")
+        from .fallback_interface import get_base_moves_fallback
+        return get_base_moves_fallback(fen)
 
 
 # Example usage and testing
