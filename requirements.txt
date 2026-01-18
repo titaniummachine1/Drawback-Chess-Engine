@@ -1,18 +1,17 @@
-# Core dependencies for Drawback Chess Engine
+# Minimal dependencies for Drawback Chess Engine
 
-# Machine Learning
-tensorflow>=2.13.0
-numpy>=1.24.0
-scikit-learn>=1.3.0
+# Database
+sqlalchemy>=2.0.0
 
 # Chess logic
 python-chess>=1.999
 
+# Core ML (minimal)
+numpy>=1.24.0
+
 # Utilities
-matplotlib>=3.7.0
 tqdm>=4.65.0
 
-# Development
+# Development (optional)
 pytest>=7.4.0
 black>=23.0.0
-flake8>=6.0.0
