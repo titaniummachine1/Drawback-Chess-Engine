@@ -7,8 +7,11 @@ This is the heart of the move-selection logic.
 
 import subprocess
 import time
+import platform
+from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
+from .embedded_path import get_embedded_engine_path
 
 
 @dataclass
@@ -297,18 +300,26 @@ class FairyStockfishInterface:
 
 
 # Convenience functions for the pipeline
-def create_fairy_interface(stockfish_path: str = "stockfish") -> FairyStockfishInterface:
+def create_fairy_interface(stockfish_path: str = None) -> FairyStockfishInterface:
     """Create a new Fairy-Stockfish interface."""
+    if stockfish_path is None:
+        # Use the embedded engine path detection
+        stockfish_path = get_embedded_engine_path()
+    
     return FairyStockfishInterface(stockfish_path)
 
 
-def get_base_moves_fast(fen: str, stockfish_path: str = "stockfish") -> List[str]:
+def get_base_moves_fast(fen: str, stockfish_path: str = None) -> List[str]:
     """
     Fast function to get base moves - core of the subtractive mask pipeline.
     
     Falls back to python-chess if Fairy-Stockfish is not available.
     """
     try:
+        if stockfish_path is None:
+            # Use the embedded engine path detection
+            stockfish_path = get_embedded_engine_path()
+        
         with create_fairy_interface(stockfish_path) as fs:
             result = fs.get_base_moves(fen)
             return result.base_moves

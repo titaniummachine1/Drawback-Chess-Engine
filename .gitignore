@@ -58,3 +58,7 @@ games/
 # Temporary files
 tmp/
 temp/
+
+# Embedded chess engines
+engines/stockfish.exe
+engines/stockfish
