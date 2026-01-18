@@ -14,15 +14,15 @@ def get_embedded_engine_path() -> str:
     
     if platform.system() == "Windows":
         possible_paths = [
-            Path("c:/GitHubProjekty/engines/stockfish.exe"),  # Where it was downloaded
             Path(__file__).parent.parent.parent / "engines" / "stockfish.exe",  # Project relative
             Path("engines/stockfish.exe"),  # Relative to current working directory
+            Path("c:/GitHubProjekty/engines/stockfish.exe"),  # Old location
         ]
     else:
         possible_paths = [
-            Path("/usr/local/bin/fairy-stockfish"),  # Common installation
             Path(__file__).parent.parent.parent / "engines" / "stockfish",  # Project relative
             Path("engines/stockfish"),  # Relative to current working directory
+            Path("/usr/local/bin/fairy-stockfish"),  # Common installation
         ]
     
     for path in possible_paths:
