@@ -349,6 +349,22 @@ class SelfPlayController:
                     self.server_legal_moves[parsed['game_id']
                                             ] = parsed['legal_moves']
 
+                    # ROBUST SESSION DATA CAPTURE
+                    # We have the game ID from the packet, and prefix from the URL.
+                    # This ensures we can send moves even if we missed the init request.
+                    if side not in self.session_data:
+                        self.session_data[side] = {}
+
+                    self.session_data[side]['game_id'] = parsed['game_id']
+
+                    # Extract prefix from response URL: .../app9/game
+                    app_match = re.search(r"/(app\d+)/", response.url)
+                    if app_match:
+                        self.session_data[side]['prefix'] = app_match.group(1)
+
+                    # We might still miss username if we didn't catch the query param,
+                    # but usually handle_request catches that.
+
                     # Convert to FEN for Engine/AI
                     fen = PacketParser.board_to_fen(
                         parsed['board'], parsed['turn'])
