@@ -11,13 +11,14 @@ from pathlib import Path
 from playwright.async_api import async_playwright
 from src.engine.stockfish_wrapper import StockfishWrapper
 from src.interface.packet_parser import PacketParser
-
+import re
 import chess
 import sys
 import os
 
 # Ensure the project root is in sys.path for "src" imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 
 # CONFIG
 ENGINE_PATH = "C:/GitHubProjekty/drawbackChessAi/engines/stockfish.exe"
@@ -42,6 +43,8 @@ class SelfPlayController:
         self.network = DummyNetwork()
         self.training_file = Path(TRAINING_FILE)
         self.training_file.parent.mkdir(exist_ok=True)
+        # Store session details for packet sending: { 'white': {...}, 'black': {...} }
+        self.session_data = {}
 
     async def start(self):
         try:
@@ -61,20 +64,20 @@ class SelfPlayController:
             context_b = await browser_b.new_context()
             page_b = await context_b.new_page()
 
+            # 3. Attach Listeners & Play (EARLY to catch init traffic)
+            # We need to track the latest "Server Truth"
+            self.server_legal_moves = {}  # game_id -> list of moves
+
+            # Hook up packet capture for Reality Check
+            await self.attach_listeners(page_a, "white")
+            await self.attach_listeners(page_b, "black")
+
             # 2. Setup Game (Simplified)
             # Window A creates the game
             game_url = await self.create_game(page_a)
 
             # Window B joins as black
             await self.join_game(page_b, game_url)
-
-            # 3. Attach Listeners & Play
-            # We need to track the latest "Server Truth"
-            self.server_legal_moves = {}  # game_id -> list of moves
-
-            # Hook up packet capture for Reality Check
-            await self.attach_listeners(page_a, "WHITE")
-            await self.attach_listeners(page_b, "BLACK")
 
             # Game Loop
             # We track whose turn it is from the intercepted packets
@@ -162,20 +165,34 @@ class SelfPlayController:
         # 1. Handle ELO selection if it appears
         try:
             intermediate = page.get_by_text("Intermediate")
-            if await intermediate.is_visible(timeout=3000):
+            if await intermediate.is_visible(timeout=5000):
                 logger.info("Setting ELO to Intermediate...")
                 await intermediate.click()
+                await asyncio.sleep(2)  # Wait for modal transition
         except:
             pass
 
-        # 2. Handle 'How to Play' notice (often has a 'Close' button or 'X')
+        # 2. Handle 'How to Play' notice
+        logger.info("Checking for 'How to Play' notice...")
         try:
-            close_btn = page.get_by_role("button", name="Close")
-            if await close_btn.is_visible(timeout=2000):
-                logger.info("Closing 'How to Play' notice...")
-                await close_btn.click()
-        except:
-            pass
+            # Try to find the CLOSE button in various ways
+            # 1. By text (uppercase as seen in image)
+            # 2. By role
+            close_selectors = [
+                page.get_by_text("CLOSE", exact=True),
+                page.get_by_role("button", name="CLOSE"),
+                page.locator("button").filter(
+                    has_text=re.compile(r"CLOSE", re.I))
+            ]
+
+            for selector in close_selectors:
+                if await selector.is_visible(timeout=2000):
+                    logger.info("Closing 'How to Play' notice...")
+                    await selector.click()
+                    await asyncio.sleep(2)
+                    break
+        except Exception as e:
+            logger.warning(f"Error handling popups: {e}")
 
     async def create_game(self, page):
         logger.info("Creating game via 'Play vs Friend' Flow...")
@@ -220,8 +237,101 @@ class SelfPlayController:
         await self.handle_initial_popups(page)
 
     async def attach_listeners(self, page, side):
+        # Capture outgoing requests to steal 'username' and 'app_prefix'
+        page.on("request", lambda req: asyncio.create_task(
+            self.handle_request(req, side)))
+
+        # Capture responses for Game State
         page.on("response", lambda res: asyncio.create_task(
             self.handle_response(res, side)))
+
+    async def handle_request(self, request, side):
+        try:
+            url = request.url
+            # Capture username from query params (most reliable source)
+            if "username=" in url and side not in self.session_data:
+                match = re.search(r"username=([^&]+)", url)
+                if match:
+                    username = match.group(1)
+                    if side not in self.session_data:
+                        self.session_data[side] = {}
+                    self.session_data[side]['username'] = username
+                    logger.info(f"Captured {side} username: {username}")
+
+            # Capture game_id and app_prefix from "game?" requests
+            # e.g. .../app15/game?id=...
+            if "/game?" in url and "app" in url:
+                # Extract app prefix (e.g. app15)
+                app_match = re.search(r"drawbackchess\.com/(app\d+)/game", url)
+                if app_match:
+                    if side not in self.session_data:
+                        self.session_data[side] = {}
+                    self.session_data[side]['prefix'] = app_match.group(1)
+
+                # Extract game ID
+                id_match = re.search(r"id=([a-f0-9]+)", url)
+                if id_match:
+                    if side not in self.session_data:
+                        self.session_data[side] = {}
+                    self.session_data[side]['game_id'] = id_match.group(1)
+        except:
+            pass
+
+    async def execute_move(self, page, move_uci):
+        # 1. Determine side from page url or context
+        # We passed 'page_a' (white) or 'page_b' (black) in the loop
+        # Check session data
+        side = None
+        if "/white" in page.url:
+            side = "white"
+        elif "/black" in page.url:
+            side = "black"
+
+        if not side or side not in self.session_data:
+            logger.error(f"Cannot execute move: No session data for {side}")
+            return
+
+        data = self.session_data[side]
+        username = data.get('username')
+        game_id = data.get('game_id')
+        prefix = data.get('prefix', 'app15')  # Default to app15 if missing
+
+        if not username or not game_id:
+            logger.error("Missing username or game_id for packet!")
+            return
+
+        # 2. Build Payload
+        # UCI "e2e4" -> start="E2", stop="E4"
+        start_sq = move_uci[:2].upper()
+        stop_sq = move_uci[2:4].upper()
+
+        payload = {
+            "id": game_id,
+            "start": start_sq,
+            "stop": stop_sq,
+            "username": username,
+            "color": side
+        }
+
+        # Promotion Helper
+        if len(move_uci) == 5:
+            # e.g. a7a8q
+            promo_map = {'q': 'queen', 'r': 'rook',
+                         'b': 'bishop', 'n': 'knight'}
+            promo_char = move_uci[4]
+            payload["promotion"] = promo_map.get(promo_char, 'queen')
+
+        target_url = f"https://www.drawbackchess.com/{prefix}/move"
+
+        logger.info(f"🚀 SENDING PACKET MOVE: {move_uci} -> {target_url}")
+
+        # 3. Send Request
+        try:
+            # We use the page's request context to ensure cookies/headers match (if needed)
+            # though username/auth seems to be in the body/query.
+            await page.request.post(target_url, data=payload)
+        except Exception as e:
+            logger.error(f"Move packet failed: {e}")
 
     async def handle_response(self, response, side):
         # Capture legal moves "Reality Check"
@@ -247,11 +357,11 @@ class SelfPlayController:
                             "start", "") + last_move_obj.get("stop", "")).lower()
 
                     # TRIGGER LEARNING HERE
-                    await self.run_learning_step(fen, parsed['legal_moves'])
+                    await self.run_learning_step(fen, parsed['legal_moves'], parsed.get('revealed_drawbacks', {}))
         except:
             pass
 
-    async def run_learning_step(self, fen, truth_moves):
+    async def run_learning_step(self, fen, truth_moves, revealed_drawbacks=None):
         """
         The Core Learning Loop:
         1. Get Physical Moves (Engine)
@@ -278,7 +388,8 @@ class SelfPlayController:
             "physical_moves": physical_moves,
             "legal_moves": truth_moves,
             "prediction_mask": prediction_mask,
-            "timestamp": "TODO"  # Add timestamp
+            "timestamp": "TODO",  # Add timestamp
+            "revealed_drawbacks": revealed_drawbacks or {}
         }
 
         # Append to JSONL

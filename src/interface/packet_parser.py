@@ -31,11 +31,14 @@ class PacketParser:
                     uci_moves.append(f"{start_sq}{stop_sq}".lower())
 
         # 3. Game Context
+        revealed = game_data.get("revealedHandicaps", {})
+
         return {
             "type": "game_state",
             "game_id": game_data.get("id"),
             "white_drawback": white_rule,
             "black_drawback": black_rule,
+            "revealed_drawbacks": revealed,  # Added this field
             "legal_moves": uci_moves,
             "board": game_data.get("board"),
             "turn": game_data.get("turn"),
