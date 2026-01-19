@@ -20,30 +20,123 @@ class GameInterpreter:
     """Derives complex features (sensors) from raw chess data."""
 
     @staticmethod
-    def get_sensors(fen: str, last_move_uci: Optional[str] = None) -> Dict[str, Any]:
+    def get_sensors(fen: str, history_uci: List[str] = None) -> Dict[str, Any]:
         """
-        Calculate features for a single position.
-        If last_move_uci is provided, it calculates features relative to the move that led to this position.
+        Calculate Drawback-optimized sensors for a position.
+
+        Rules:
+        - Side with NO moves loses (zugzwang).
+        - Kings can be captured.
+        - Check/Pin doesn't restrict movement in this variant.
         """
         board = chess.Board(fen)
+        turn = "white" if board.turn == chess.WHITE else "black"
+
+        # Mobility: Crucial for detecting drawbacks like "Knights cannot move"
+        legal_moves_count = len(list(board.legal_moves))
 
         sensors = {
+            "mobility": legal_moves_count,
             "is_check": board.is_check(),
-            "is_terminal": board.is_checkmate() or board.is_insufficient_material() or board.is_fifty_moves() or board.is_repetition(3),
+            "is_terminal": False,
             "terminal_type": None,
+            "turn": turn,
             "halfmove_clock": board.halfmove_clock,
             "fullmove_number": board.fullmove_number,
         }
 
-        if sensors["is_terminal"]:
-            if board.is_checkmate():
-                sensors["terminal_type"] = "checkmate"
-            elif board.is_insufficient_material():
-                sensors["terminal_type"] = "insufficient_material"
-            elif board.is_repetition(3):
+        # 1. Terminal Deduction (Drawback Rules)
+        # Check if king is missing (captured)
+        white_king = board.king(chess.WHITE)
+        black_king = board.king(chess.BLACK)
+
+        if white_king is None:
+            sensors["is_terminal"] = True
+            sensors["terminal_type"] = "white_king_captured"
+        elif black_king is None:
+            sensors["is_terminal"] = True
+            sensors["terminal_type"] = "black_king_captured"
+        elif legal_moves_count == 0:
+            sensors["is_terminal"] = True
+            sensors["terminal_type"] = f"{turn}_no_legal_moves"
+
+        # Standard draw conditions still exist (repetition, 50-move)
+        if not sensors["is_terminal"]:
+            if board.is_repetition(3):
+                sensors["is_terminal"] = True
                 sensors["terminal_type"] = "repetition"
             elif board.is_fifty_moves():
+                sensors["is_terminal"] = True
                 sensors["terminal_type"] = "fifty_moves"
+
+        # 2. General Position Sensors (Help AI 'see' patterns)
+
+        # Center Control
+        center_squares = [chess.D4, chess.D5, chess.E4, chess.E5]
+        sensors["center_control_own"] = sum(
+            1 for sq in center_squares if board.is_attacked_by(board.turn, sq))
+        sensors["center_control_opp"] = sum(
+            1 for sq in center_squares if board.is_attacked_by(not board.turn, sq))
+
+        # King Safety / Position
+        if white_king and black_king:
+            sensors["white_king_dist_center"] = abs(chess.square_file(
+                white_king) - 3.5) + abs(chess.square_rank(white_king) - 3.5)
+            sensors["black_king_dist_center"] = abs(chess.square_file(
+                black_king) - 3.5) + abs(chess.square_rank(black_king) - 3.5)
+
+        # 3. History-based sensors
+        if history_uci and len(history_uci) > 0:
+            # Same piece moved streak
+            last_move = chess.Move.from_uci(history_uci[-1])
+            # Current square because move is applied
+            piece_type = board.piece_type_at(last_move.to_square)
+
+            streak = 1
+            for i in range(len(history_uci)-2, -1, -2):  # Look at same side's previous moves
+                m = chess.Move.from_uci(history_uci[i])
+                # We can't easily know history piece types without complex playback,
+                # but we can track if the SQUARE moved from was the same.
+                if m.to_square == last_move.from_square:
+                    streak += 1
+                else:
+                    break
+            sensors["piece_move_streak"] = streak
+        else:
+            sensors["piece_move_streak"] = 0
+
+        # 4. Advanced "Smart" Sensors for AI
+
+        # Threat Counts (How many pieces are currently under attack)
+        own_pieces = board.piece_map()
+        sensors["own_attacked_count"] = sum(1 for (sq, p) in own_pieces.items(
+        ) if p.color == board.turn and board.is_attacked_by(not board.turn, sq))
+        sensors["opp_attacked_count"] = sum(1 for (sq, p) in own_pieces.items(
+        ) if p.color != board.turn and board.is_attacked_by(board.turn, sq))
+
+        # Material Imbalance
+        white_val = sum(PIECE_VALUES.get(p.piece_type, 0)
+                        for p in board.piece_map().values() if p.color == chess.WHITE)
+        black_val = sum(PIECE_VALUES.get(p.piece_type, 0)
+                        for p in board.piece_map().values() if p.color == chess.BLACK)
+        sensors["material_delta"] = white_val - \
+            black_val if board.turn == chess.WHITE else black_val - white_val
+
+        # Piece Diversity (Count of unique piece types left)
+        sensors["unique_piece_types"] = len(
+            set(p.piece_type for p in board.piece_map().values() if p.color == board.turn))
+
+        # King Neighborhood (Threats near king)
+        king_sq = white_king if board.turn == chess.WHITE else black_king
+        if king_sq:
+            nhood = chess.SquareSet(chess.BB_KING_ATTACKS[king_sq])
+            sensors["king_neighbors_attacked"] = sum(
+                1 for sq in nhood if board.is_attacked_by(not board.turn, sq))
+            sensors["pawn_shield_count"] = sum(1 for sq in nhood if board.piece_type_at(
+                sq) == chess.PAWN and board.color_at(sq) == board.turn)
+        else:
+            sensors["king_neighbors_attacked"] = 0
+            sensors["pawn_shield_count"] = 0
 
         return sensors
 

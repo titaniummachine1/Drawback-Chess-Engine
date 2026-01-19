@@ -53,6 +53,7 @@ class TrainingSample:
 
         # Add sensors if available
         if self.sensors:
+            # Basic sensors
             batch["is_check"] = torch.tensor(
                 [1.0 if self.sensors.get("is_check") else 0.0])
             batch["is_capture"] = torch.tensor(
@@ -61,6 +62,24 @@ class TrainingSample:
                 [self.sensors.get("captured_value", 0.0)], dtype=torch.float32)
             batch["halfmove_clock"] = torch.tensor(
                 [self.sensors.get("halfmove_clock", 0.0)], dtype=torch.float32)
+
+            # New Drawback-specific smart sensors
+            batch["mobility"] = torch.tensor(
+                [self.sensors.get("mobility", 0.0)], dtype=torch.float32)
+            batch["piece_move_streak"] = torch.tensor(
+                [self.sensors.get("piece_move_streak", 0.0)], dtype=torch.float32)
+            batch["own_attacked_count"] = torch.tensor(
+                [self.sensors.get("own_attacked_count", 0.0)], dtype=torch.float32)
+            batch["opp_attacked_count"] = torch.tensor(
+                [self.sensors.get("opp_attacked_count", 0.0)], dtype=torch.float32)
+            batch["material_delta"] = torch.tensor(
+                [self.sensors.get("material_delta", 0.0)], dtype=torch.float32)
+            batch["unique_piece_types"] = torch.tensor(
+                [self.sensors.get("unique_piece_types", 0.0)], dtype=torch.float32)
+            batch["king_neighbors_attacked"] = torch.tensor(
+                [self.sensors.get("king_neighbors_attacked", 0.0)], dtype=torch.float32)
+            batch["pawn_shield_count"] = torch.tensor(
+                [self.sensors.get("pawn_shield_count", 0.0)], dtype=torch.float32)
 
             # Captured counts as a flat vector
             counts = self.sensors.get("captured_counts", {})
@@ -116,7 +135,7 @@ class TrainingExtractor:
                 "severity", 0.0) if drawback_info else 0.0
 
             # 4. Generate Sensors (Smart deduction)
-            sensors = GameInterpreter.get_sensors(fen)
+            sensors = GameInterpreter.get_sensors(fen, history)
             # Add Capture/Move specific data if history exists
             if history and prev_fen:
                 move_analysis = GameInterpreter.analyze_move(

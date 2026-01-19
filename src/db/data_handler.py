@@ -9,6 +9,7 @@ from datetime import datetime
 
 from .database import get_database
 from .models import Game, Position
+from .drawback_manager import DrawbackManager
 from ..interface.packet_parser import PacketParser
 
 logger = logging.getLogger(__name__)
@@ -17,6 +18,7 @@ logger = logging.getLogger(__name__)
 class DataHandler:
     def __init__(self):
         self.db = get_database()
+        self.drawback_manager = DrawbackManager()
         self.active_games = {}  # Maps site game_id to DB game record ID
 
     def process_parsed_data(self, data: Dict[str, Any]):
@@ -47,11 +49,19 @@ class DataHandler:
                 session.flush()  # Get the ID
                 logger.info(f"Created new game record: {game_id}")
 
-            # 2. Update drawbacks if they were null (common when joining mid-game)
-            if data["white_drawback"] and not game_record.white_drawback:
-                game_record.white_drawback = data["white_drawback"]
-            if data["black_drawback"] and not game_record.black_drawback:
-                game_record.black_drawback = data["black_drawback"]
+            # 2. Update drawbacks and Register in Manager
+            if data["white_drawback"]:
+                if not game_record.white_drawback:
+                    game_record.white_drawback = data["white_drawback"]
+                # Assumes name:description format or just the text
+                self.drawback_manager.register_drawback(
+                    data["white_drawback"].split(":")[0], data["white_drawback"])
+
+            if data["black_drawback"]:
+                if not game_record.black_drawback:
+                    game_record.black_drawback = data["black_drawback"]
+                self.drawback_manager.register_drawback(
+                    data["black_drawback"].split(":")[0], data["black_drawback"])
 
             # 3. Store the Position (Training Data)
             fen = PacketParser.board_to_fen(data["board"], data["turn"])
