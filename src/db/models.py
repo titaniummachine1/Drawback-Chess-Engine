@@ -26,8 +26,8 @@ class Game(Base):
     result = Column(String(20), nullable=True)  # 'white_win', 'black_win', 'draw'
     opponent_type = Column(String(20), nullable=True)  # 'human', 'engine', 'self_play'
     engine_version = Column(String(50), nullable=True)
-    white_drawback = Column(String(100), nullable=True)  # Name of White's hidden drawback
-    black_drawback = Column(String(100), nullable=True)  # Name of Black's hidden drawback
+    white_drawback = Column(Text, nullable=True)  # Full description of White's rule
+    black_drawback = Column(Text, nullable=True)  # Full description of Black's rule
     total_moves = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=func.now())
     
@@ -48,9 +48,10 @@ class Position(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     game_id = Column(Integer, ForeignKey('games.id'), nullable=False)
     move_number = Column(Integer, nullable=False)  # Ply number
-    fen = Column(String(100), nullable=False)  # Complete position state
+    fen = Column(Text, nullable=False)  # Complete position (using Text for safety)
     move_uci = Column(String(10), nullable=True)  # The move played in this position
     legal_moves = Column(Text, nullable=False)  # JSON array of legal UCI moves
+    active_side = Column(String(10), nullable=True) # 'white' or 'black'
     created_at = Column(DateTime, default=func.now())
     
     # Relationships
