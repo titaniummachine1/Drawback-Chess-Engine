@@ -59,6 +59,18 @@ class PacketParser:
         return None
 
     @staticmethod
+    def parse_game_result(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Extract game result when a game ends."""
+        if "winner" in data or "result" in data:
+            return {
+                "type": "game_over",
+                "game_id": data.get("id"),
+                "result": data.get("result"),  # e.g., 'white_win', 'draw'
+                "winner": data.get("winner")
+            }
+        return None
+
+    @staticmethod
     def board_to_fen(board: Dict[str, Any], turn: str) -> str:
         """
         Convert the site's board dictionary into a FEN-like string.

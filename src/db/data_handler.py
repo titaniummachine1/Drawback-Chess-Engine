@@ -27,6 +27,8 @@ class DataHandler:
             self._handle_game_state(data)
         elif data_type == "local_move":
             self._handle_local_move(data)
+        elif data_type == "game_over":
+            self._handle_game_over(data)
 
     def _handle_game_state(self, data: Dict[str, Any]):
         """Update or create a game and store the current position + legal moves."""
@@ -92,3 +94,17 @@ class DataHandler:
             if pos and not pos.move_uci:
                 pos.move_uci = uci
                 logger.info(f"Recorded move {uci} for game {game_id}")
+
+    def _handle_game_over(self, data: Dict[str, Any]):
+        """Store the final result of the game."""
+        game_id = data["game_id"]
+        result = data["result"]
+
+        with self.db.get_session() as session:
+            game_record = session.query(Game).filter_by(uuid=game_id).first()
+            if game_record:
+                game_record.result = result
+                # Calculate total moves from positions
+                game_record.total_moves = session.query(
+                    Position).filter_by(game_id=game_record.id).count()
+                logger.info(f"Game {game_id} ended. Result: {result}")

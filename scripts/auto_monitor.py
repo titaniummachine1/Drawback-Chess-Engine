@@ -133,7 +133,7 @@ class AutoMonitor:
                     f.flush()
 
                 # Highlight significant game data in console
-                if '"moves"' in body or '"drawback"' in body.lower() or '"reveal"' in body.lower():
+                if '"moves"' in body or '"drawback"' in body.lower() or '"reveal"' in body.lower() or '"winner"' in body.lower():
                     print(f"\n[DATA] {source} RECEIVED JSON (Saved to DB)")
                     try:
                         parsed = json.loads(body)
@@ -147,6 +147,12 @@ class AutoMonitor:
                             f" - Side: {game_data['turn']} (Ply {game_data['ply']})")
                         print(
                             f" - Drawback: {game_data['white_drawback'] if game_data['turn'] == 'white' else game_data['black_drawback']}")
+
+                        # Check for result (game over)
+                        result_data = PacketParser.parse_game_result(parsed)
+                        if result_data:
+                            self.data_handler.process_parsed_data(result_data)
+                            print(f" [FINISH] Game {result_data['result']}")
                     except Exception as e:
                         print(f"[ERROR] DB Storage failed: {e}")
                     print("="*60)
