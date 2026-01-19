@@ -363,9 +363,15 @@ class SelfPlayController:
     async def handle_response(self, response, side):
         # Capture legal moves "Reality Check"
         try:
-            if "game" in response.url and response.request.method == "POST":  # Heuristic
-                body = await response.text()
-                if "moves" in body:
+            # Widen heuristic: check for 'game' in URL, but also just check body for 'moves' structure
+            # to capture polling/updates that might not be POST or strictly named 'game'
+            if "game" in response.url or "poll" in response.url:
+                try:
+                    body = await response.text()
+                except:
+                    return
+
+                if "moves" in body and "handicaps" in body:
                     data = json.loads(body)
                     parsed = PacketParser.parse_game_state(data)
                     self.server_legal_moves[parsed['game_id']
