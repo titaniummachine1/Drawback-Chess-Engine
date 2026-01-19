@@ -3,19 +3,23 @@ Self-Play Automation with "No-Lag" Engine Architecture.
 Hosts two browser instances, plays a game using a persistent engine + MCTS stub.
 """
 
+import string
+import chess
+import re
+from src.interface.packet_parser import PacketParser
+from src.engine.stockfish_wrapper import StockfishWrapper
+from playwright.async_api import async_playwright
+from pathlib import Path
+import json
 import asyncio
 import logging
 import random
-import json
-from pathlib import Path
-from playwright.async_api import async_playwright
-from src.engine.stockfish_wrapper import StockfishWrapper
-from src.interface.packet_parser import PacketParser
-import re
-import chess
-import string
 import sys
 import os
+
+# Ensure the project root is in sys.path for "src" imports
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 
 # Ensure the project root is in sys.path for "src" imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -86,15 +90,22 @@ class SelfPlayController:
             self.latest_fen = None
             self.last_move_uci = None
 
+            loop_counter = 0
             while True:
                 await asyncio.sleep(0.1)
+                loop_counter += 1
 
                 # Check whose turn?
                 # This needs to be updated by handle_response
                 if self.latest_fen and self.current_turn_color:
+                    if loop_counter % 50 == 0:
+                        logger.info(
+                            f"Loop State: Turn={self.current_turn_color}, FEN={self.latest_fen[:20]}...")
+
                     # Decide move
                     move = await self.decide_move(self.latest_fen)
                     if move:
+                        # logger.info(f"Decided move: {move}") # Verbose
                         if self.current_turn_color == "white":
                             await self.execute_move(page_a, move)
                         else:
@@ -102,6 +113,10 @@ class SelfPlayController:
 
                         # Wait for next turn (reset state to avoid spam)
                         self.latest_fen = None
+
+                elif loop_counter % 50 == 0:  # Log every 5s approx
+                    logger.info("Waiting for game state/turn...")
+                    logger.debug(f"Session Data: {self.session_data}")
 
     async def decide_move(self, fen: str):
         """
@@ -331,10 +346,17 @@ class SelfPlayController:
         logger.info(f"🚀 SENDING PACKET MOVE: {move_uci} -> {target_url}")
 
         # 3. Send Request
+        headers = {
+            "Content-Type": "application/json",
+            "Origin": "https://www.drawbackchess.com",
+            "Referer": "https://www.drawbackchess.com/",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+
         try:
             # We use the page's request context to ensure cookies/headers match (if needed)
             # though username/auth seems to be in the body/query.
-            await page.request.post(target_url, data=payload)
+            await page.request.post(target_url, data=payload, headers=headers)
         except Exception as e:
             logger.error(f"Move packet failed: {e}")
 
