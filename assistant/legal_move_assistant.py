@@ -59,6 +59,8 @@ class LegalMoveAssistant:
         self.browser = None
         self.page = None
         self.latest_state = {}
+        self.player_color = None
+        self.last_highlighted_fen = None
 
     async def run(self, url: str) -> None:
         async with async_playwright() as playwright:
@@ -107,6 +109,11 @@ class LegalMoveAssistant:
             
             if isinstance(data, dict) and "game" in data:
                 print(f"[DEBUG] HTTP response from {url}")
+                
+                if self.player_color is None and "color" in data:
+                    self.player_color = data["color"]
+                    print(f"[ASSIST] Detected player color: {self.player_color}")
+                
                 await self._process_game_data(data)
         except Exception as e:
             pass
@@ -136,8 +143,17 @@ class LegalMoveAssistant:
         if not legal_moves or not board_state or not turn:
             print("[DEBUG] Skipping: missing legal_moves, board, or turn")
             return
+        
+        if self.player_color and turn != self.player_color:
+            print(f"[DEBUG] Skipping: not player's turn (player={self.player_color}, turn={turn})")
+            return
 
         fen = PacketParser.board_to_fen(board_state, turn)
+        
+        if self.last_highlighted_fen == fen:
+            print(f"[DEBUG] Skipping: position unchanged")
+            return
+        
         print(f"[DEBUG] FEN: {fen[:50]}...")
         
         best_move, score = self._score_moves(fen, legal_moves)
@@ -149,6 +165,8 @@ class LegalMoveAssistant:
         await self._record_best_move(parsed, best_move, score, legal_moves)
         await self._highlight_move(best_move, score)
         print(f"[DEBUG] Highlight attempted for {best_move}")
+        
+        self.last_highlighted_fen = fen
 
     def _score_moves(self, fen: str, uci_moves: List[str]):
         board = chess.Board(fen)
