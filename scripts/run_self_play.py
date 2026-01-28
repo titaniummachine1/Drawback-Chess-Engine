@@ -1,25 +1,16 @@
-"""
-Self-Play Automation with "No-Lag" Engine Architecture.
-Hosts two browser instances, plays a game using a persistent engine + MCTS stub.
-"""
-
-import string
-import chess
-import re
 from src.interface.packet_parser import PacketParser
 from src.engine.stockfish_wrapper import StockfishWrapper
 from playwright.async_api import async_playwright
-from pathlib import Path
-import json
-import asyncio
-import logging
 import random
+import logging
+import asyncio
+import json
+import re
+import chess
+import string
 import sys
 import os
-
-# Ensure the project root is in sys.path for "src" imports
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
+from pathlib import Path
 
 # Ensure the project root is in sys.path for "src" imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -96,27 +87,33 @@ class SelfPlayController:
                 loop_counter += 1
 
                 # Check whose turn?
-                # This needs to be updated by handle_response
                 if self.latest_fen and self.current_turn_color:
-                    if loop_counter % 50 == 0:
+                    # Capture and clear immediately to prevent race conditions
+                    fen_to_process = self.latest_fen
+                    color_to_move = self.current_turn_color
+                    self.latest_fen = None
+                    self.current_turn_color = None
+
+                    if loop_counter % 10 == 0:
                         logger.info(
-                            f"Loop State: Turn={self.current_turn_color}, FEN={self.latest_fen[:20]}...")
+                            f"Processing Turn: {color_to_move} | FEN: {fen_to_process[:30]}...")
 
                     # Decide move
-                    move = await self.decide_move(self.latest_fen)
+                    move = await self.decide_move(fen_to_process)
                     if move:
-                        # logger.info(f"Decided move: {move}") # Verbose
-                        if self.current_turn_color == "white":
+                        logger.info(
+                            f"♟️ {color_to_move.upper()} decided move: {move}")
+                        if color_to_move == "white":
                             await self.execute_move(page_a, move)
                         else:
                             await self.execute_move(page_b, move)
+                    else:
+                        logger.warning(
+                            f"No move decided for {color_to_move} at {fen_to_process[:30]}")
 
-                        # Wait for next turn (reset state to avoid spam)
-                        self.latest_fen = None
-
-                elif loop_counter % 50 == 0:  # Log every 5s approx
-                    logger.info("Waiting for game state/turn...")
-                    logger.debug(f"Session Data: {self.session_data}")
+                elif loop_counter % 50 == 0:
+                    logger.info(
+                        "Waiting for game state/turn update from server...")
 
     async def decide_move(self, fen: str):
         """

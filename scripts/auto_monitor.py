@@ -11,9 +11,14 @@ import asyncio
 import json
 import os
 import re
+import sys
 from datetime import datetime
 from pathlib import Path
-from playwright.async_api import async_playwright
+from playwright.async_api import PlaywrightError, async_playwright
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 # Internal imports
 from src.interface.packet_parser import PacketParser
@@ -246,7 +251,11 @@ class AutoMonitor:
             except asyncio.CancelledError:
                 pass
             finally:
-                await self.browser.close()
+                if self.browser:
+                    try:
+                        await self.browser.close()
+                    except PlaywrightError as exc:
+                        print(f"[WARN] Browser close failed: {exc}")
 
 
 if __name__ == "__main__":
