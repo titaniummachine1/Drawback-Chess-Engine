@@ -280,13 +280,21 @@ class LegalMoveAssistant:
         if not self.page:
             print("[DEBUG] No page available for highlight")
             return
-        start = uci_move[:2]
-        stop = uci_move[2:4]
-        try:
-            await self.page.evaluate("(start, stop) => window.assistantHighlight(start, stop)", start, stop)
-            print(f"[DEBUG] Highlight call succeeded: {start} -> {stop}")
-        except Exception as e:
-            print(f"[DEBUG] Highlight call failed: {e}")
+        start = uci_move[:2].upper()
+        stop = uci_move[2:4].upper()
+        
+        for attempt in range(10):
+            try:
+                is_ready = await self.page.evaluate("() => typeof window.assistantHighlight === 'function'")
+                if is_ready:
+                    await self.page.evaluate(f"window.assistantHighlight('{start}', '{stop}')")
+                    print(f"[DEBUG] Highlight call succeeded: {start} -> {stop}")
+                    return
+            except Exception:
+                pass
+            await asyncio.sleep(0.1)
+        
+        print(f"[DEBUG] Highlight call failed: overlay not ready after 1s")
 
     def _apply_variant_config(self) -> None:
         if not self.variant_config or not self.variant_config.loaded:
