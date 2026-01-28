@@ -66,14 +66,15 @@ class LegalMoveAssistant:
             context = await self.browser.new_context()
             self.page = await context.new_page()
 
-            await self._inject_overlay(self.page)
             self._attach_socket_logger(self.page)
 
             print(f"[ASSIST] Navigating to {url}")
             await self.page.goto(url)
 
+            print("[ASSIST] Waiting for game board...")
             try:
                 while True:
+                    await self._ensure_overlay(self.page)
                     await asyncio.sleep(1)
             except asyncio.CancelledError:
                 pass
@@ -89,6 +90,26 @@ class LegalMoveAssistant:
             )
 
         page.on("socket", handle_socket)
+        page.on("response", lambda res: asyncio.create_task(self._handle_response(res)))
+
+    async def _handle_response(self, response):
+        url = response.url
+        if "/game?" not in url and "/app" not in url:
+            return
+        
+        try:
+            content_type = response.headers.get("content-type", "")
+            if "application/json" not in content_type and "text/plain" not in content_type:
+                return
+            
+            body = await response.text()
+            data = json.loads(body)
+            
+            if isinstance(data, dict) and "game" in data:
+                print(f"[DEBUG] HTTP response from {url}")
+                await self._process_game_data(data)
+        except Exception as e:
+            pass
 
     async def _handle_payload(self, payload: str) -> None:
         try:
@@ -99,23 +120,35 @@ class LegalMoveAssistant:
         if not isinstance(data, dict) or "game" not in data:
             return
 
+        print("[DEBUG] WebSocket packet received")
+        await self._process_game_data(data)
+
+    async def _process_game_data(self, data: dict) -> None:
         await self._persist_packet(data)
 
         parsed = PacketParser.parse_game_state(data)
         legal_moves = parsed.get("legal_moves") or []
         board_state = parsed.get("board")
         turn = parsed.get("turn")
+        
+        print(f"[DEBUG] Parsed: {len(legal_moves)} legal moves, turn={turn}")
+        
         if not legal_moves or not board_state or not turn:
+            print("[DEBUG] Skipping: missing legal_moves, board, or turn")
             return
 
         fen = PacketParser.board_to_fen(board_state, turn)
+        print(f"[DEBUG] FEN: {fen[:50]}...")
+        
         best_move, score = self._score_moves(fen, legal_moves)
         if not best_move:
+            print("[DEBUG] No best move found")
             return
 
         print(f"[ASSIST] Best move: {best_move} ({score:.2f} cp)")
         await self._record_best_move(parsed, best_move, score, legal_moves)
         await self._highlight_move(best_move, score)
+        print(f"[DEBUG] Highlight attempted for {best_move}")
 
     def _score_moves(self, fen: str, uci_moves: List[str]):
         board = chess.Board(fen)
@@ -136,10 +169,23 @@ class LegalMoveAssistant:
         score = info["score"].white().score(mate_score=10000)
         return move.uci(), float(score)
 
-    async def _inject_overlay(self, page):
+    async def _ensure_overlay(self, page):
         board_selector = self.selectors["board_root"]
         square_template = self.selectors["square_template"]
         overlay_id = self.selectors["overlay_id"]
+
+        try:
+            if await page.locator(board_selector).count() == 0:
+                return
+            
+            is_injected = await page.evaluate("() => !!window.assistantHighlight")
+            if is_injected:
+                return
+            
+            print(f"[ASSIST] Board found ({board_selector}), injecting overlay...")
+
+        except Exception:
+            return
 
         js_helper = f"""
 (() => {{
@@ -149,7 +195,29 @@ class LegalMoveAssistant:
 
   const root = document.querySelector('{board_selector}');
   if (!root) {{
-    throw new Error('Board root not found for selector {board_selector}');
+    return;
+  }}
+
+  const ensureSquareIds = () => {{
+    const squares = Array.from(root.querySelectorAll('.square'));
+    if (!squares.length) {{
+      return false;
+    }}
+    const files = ['a','b','c','d','e','f','g','h'];
+    for (let idx = 0; idx < squares.length; idx += 1) {{
+      const sq = squares[idx];
+      if (!sq.dataset.square) {{
+        const file = files[idx % 8];
+        const rank = 8 - Math.floor(idx / 8);
+        sq.dataset.square = `${{file}}${{rank}}`.toUpperCase();
+      }}
+    }}
+    return true;
+  }};
+
+  if (!ensureSquareIds()) {{
+    console.warn('ASSIST: Square nodes missing inside board root');
+    return;
   }}
 
   const existing = document.getElementById('{overlay_id}');
@@ -163,9 +231,10 @@ class LegalMoveAssistant:
     .assistant-highlight {{
       position: absolute;
       inset: 0;
-      border: 3px solid rgba(0, 200, 0, 0.8);
-      box-shadow: inset 0 0 10px rgba(0, 255, 0, 0.5);
+      border: 3px solid rgba(0, 255, 0, 0.9);
+      box-shadow: inset 0 0 15px rgba(0, 255, 0, 0.6);
       pointer-events: none;
+      z-index: 10000;
     }}
   `;
   document.head.appendChild(style);
@@ -178,32 +247,46 @@ class LegalMoveAssistant:
     const selector = `{square_template}`.replace('%s', square.toUpperCase());
     const target = document.querySelector(selector);
     if (!target) {{
-      throw new Error('Square not found: ' + square);
+      console.warn('ASSIST: Square not found for highlight:', square);
+      return;
     }}
-    const container = target.closest('[data-square], .square, div');
-    const rectTarget = container || target;
+    
+    const computedStyle = window.getComputedStyle(target);
+    if (computedStyle.position === 'static') {{
+        target.style.position = 'relative';
+    }}
+
     const overlay = document.createElement('div');
     overlay.className = 'assistant-highlight';
-    const parent = rectTarget;
-    parent.style.position = parent.style.position || 'relative';
-    parent.appendChild(overlay);
+    target.appendChild(overlay);
   }}
 
   window.assistantHighlight = (start, stop) => {{
+    ensureSquareIds();
     clearHighlights();
     highlightSquare(start);
     highlightSquare(stop);
   }};
+  
+  console.log('ASSIST: Overlay injected successfully');
 }})();
 """
-        await page.add_script_tag(content=js_helper)
+        try:
+            await page.add_script_tag(content=js_helper)
+        except Exception as e:
+            print(f"[WARN] Failed to inject overlay: {e}")
 
     async def _highlight_move(self, uci_move: str, score: float):
         if not self.page:
+            print("[DEBUG] No page available for highlight")
             return
         start = uci_move[:2]
         stop = uci_move[2:4]
-        await self.page.evaluate("(start, stop) => window.assistantHighlight(start, stop)", start, stop)
+        try:
+            await self.page.evaluate("(start, stop) => window.assistantHighlight(start, stop)", start, stop)
+            print(f"[DEBUG] Highlight call succeeded: {start} -> {stop}")
+        except Exception as e:
+            print(f"[DEBUG] Highlight call failed: {e}")
 
     def _apply_variant_config(self) -> None:
         if not self.variant_config or not self.variant_config.loaded:

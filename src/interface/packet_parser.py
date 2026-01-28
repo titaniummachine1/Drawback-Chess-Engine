@@ -21,8 +21,10 @@ class PacketParser:
         white_rule = handicaps.get("white")
         black_rule = handicaps.get("black")
 
-        # 2. Extract Legal Moves and convert to UCI (e.g., {"E2": [{"stop": "E4"}]} -> ["E2E4"])
-        raw_moves = game_data.get("moves", {})
+        # 2. Extract Legal Moves and convert to UCI (e.g., {"E2": [{"stop": "E4"}]} -> ["e2e4"])
+        turn = game_data.get("turn")
+        legal_premoves = game_data.get("legal_premoves", {})
+        raw_moves = legal_premoves.get(turn, {}) if turn else {}
         uci_moves = []
         for start_sq, destinations in raw_moves.items():
             for move_obj in destinations:
