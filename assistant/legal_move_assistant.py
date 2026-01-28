@@ -158,7 +158,7 @@ class LegalMoveAssistant:
         print(f"[DEBUG] Ply {ply}: {len(legal_moves)} legal moves, turn={turn}, lastMove={last_move}")
         
         if not legal_moves:
-            print(f"[ERROR] No legal moves found in 'moves' field")
+            print(f"[DEBUG] Waiting for server to send legal moves (moves field is empty)")
             return
 
         fen = PacketParser.board_to_fen(board_state, turn)
