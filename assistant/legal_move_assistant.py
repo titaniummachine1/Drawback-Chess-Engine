@@ -96,7 +96,7 @@ class LegalMoveAssistant:
 
     async def _handle_response(self, response):
         url = response.url
-        if "/game?" not in url and "/app" not in url:
+        if "/game" not in url and "/move" not in url and "/new_game" not in url:
             return
         
         try:
@@ -116,7 +116,7 @@ class LegalMoveAssistant:
                 
                 await self._process_game_data(data)
         except Exception as e:
-            pass
+            print(f"[ERROR] Failed to process response from {url}: {e}")
 
     async def _handle_payload(self, payload: str) -> None:
         try:
@@ -132,20 +132,33 @@ class LegalMoveAssistant:
 
     async def _process_game_data(self, data: dict) -> None:
         await self._persist_packet(data)
-
-        parsed = PacketParser.parse_game_state(data)
-        legal_moves = parsed.get("legal_moves") or []
-        board_state = parsed.get("board")
-        turn = parsed.get("turn")
         
-        print(f"[DEBUG] Parsed: {len(legal_moves)} legal moves, turn={turn}")
+        game_data = data.get("game", {})
+        board_state = game_data.get("board")
+        turn = game_data.get("turn")
+        last_move = game_data.get("lastMove")
+        ply = game_data.get("ply", 0)
         
-        if not legal_moves or not board_state or not turn:
-            print("[DEBUG] Skipping: missing legal_moves, board, or turn")
+        if not board_state or not turn or not self.player_color:
+            print(f"[DEBUG] Skipping: board={bool(board_state)}, turn={turn}, player={self.player_color}")
             return
         
-        if self.player_color and turn != self.player_color:
-            print(f"[DEBUG] Skipping: not player's turn (player={self.player_color}, turn={turn})")
+        if turn != self.player_color:
+            print(f"[DEBUG] Waiting for your turn (current: {turn})")
+            return
+        
+        current_moves = game_data.get("moves", {})
+        legal_moves = []
+        for start_sq, destinations in current_moves.items():
+            for move_obj in destinations:
+                stop_sq = move_obj.get("stop")
+                if start_sq and stop_sq:
+                    legal_moves.append(f"{start_sq}{stop_sq}".lower())
+        
+        print(f"[DEBUG] Ply {ply}: {len(legal_moves)} legal moves, turn={turn}, lastMove={last_move}")
+        
+        if not legal_moves:
+            print(f"[ERROR] No legal moves found in 'moves' field")
             return
 
         fen = PacketParser.board_to_fen(board_state, turn)
@@ -155,13 +168,17 @@ class LegalMoveAssistant:
             return
         
         print(f"[DEBUG] FEN: {fen[:50]}...")
+        print(f"[DEBUG] Evaluating {len(legal_moves)} legal moves with Stockfish...")
         
         best_move, score = self._score_moves(fen, legal_moves)
         if not best_move:
-            print("[DEBUG] No best move found")
+            print(f"[ERROR] Stockfish found no valid move from {len(legal_moves)} legal moves")
+            print(f"[ERROR] Sample moves: {legal_moves[:5]}")
             return
 
         print(f"[ASSIST] Best move: {best_move} ({score:.2f} cp)")
+        
+        parsed = PacketParser.parse_game_state(data)
         await self._record_best_move(parsed, best_move, score, legal_moves)
         await self._highlight_move(best_move, score)
         print(f"[DEBUG] Highlight attempted for {best_move}")
