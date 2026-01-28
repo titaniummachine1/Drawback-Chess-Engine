@@ -14,7 +14,7 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
-from playwright.async_api import PlaywrightError, async_playwright
+from playwright.async_api import async_playwright
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -251,11 +251,19 @@ class AutoMonitor:
             except asyncio.CancelledError:
                 pass
             finally:
+                if self.context:
+                    try:
+                        await self.context.close()
+                    except Exception as exc:
+                        print(f"[WARN] Context close failed: {exc}")
+                    self.context = None
+
                 if self.browser:
                     try:
                         await self.browser.close()
-                    except PlaywrightError as exc:
+                    except Exception as exc:
                         print(f"[WARN] Browser close failed: {exc}")
+                    self.browser = None
 
 
 if __name__ == "__main__":
