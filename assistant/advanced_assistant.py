@@ -137,6 +137,7 @@ class AdvancedAssistant:
         self.show_move_quality = False  # Only on piece selection
         self.show_threats = True
         self.show_best_move = True
+        self.auto_play = False  # Auto-play best move
         self.search_depth = 14
         self.search_time = 2.0  # Default 2 seconds
         
@@ -381,7 +382,7 @@ class AdvancedAssistant:
         await self._record_analysis(parsed, best_move, best_score, {}, threats)
     
     async def _analyze_selected_piece(self, square: str):
-        """Analyze moves for a specific piece (on-demand)."""
+        """Analyze moves for a specific piece with progressive deepening."""
         if not self.current_fen or not self.current_legal_moves:
             return
         
@@ -392,10 +393,10 @@ class AdvancedAssistant:
             print(f"[DEBUG] No moves from {square}")
             return
         
-        print(f"[ANALYSIS] Evaluating {len(piece_moves)} moves from {square}...")
+        print(f"[ANALYSIS] Progressive analysis of {len(piece_moves)} moves from {square}...")
         
-        # Evaluate these specific moves
-        move_evals = await self._evaluate_all_moves(self.current_fen, piece_moves)
+        # Use progressive deepening with MultiPV
+        move_evals = await self._evaluate_moves_progressive(self.current_fen, piece_moves)
         
         if not move_evals:
             return
@@ -415,7 +416,7 @@ class AdvancedAssistant:
         # Show quality overlays
         await self._show_move_qualities(move_qualities)
         
-        print(f"[QUALITY] Showing {len(move_qualities)} move qualities for {square}")
+        print(f"[QUALITY] Final: {len(move_qualities)} move qualities for {square}")
     
     def _score_moves(self, fen: str, uci_moves: List[str]) -> Tuple[str, float]:
         """Find best move from list using Stockfish."""
@@ -451,6 +452,94 @@ class AdvancedAssistant:
         # Cache result
         self.move_cache[cache_key] = result
         return result
+    
+    async def _evaluate_moves_progressive(self, fen: str, legal_moves: List[str]) -> Dict[str, float]:
+        """Progressive deepening analysis - show results immediately and deepen."""
+        cache_key = f"{fen}:{','.join(sorted(legal_moves))}"
+        if cache_key in self.move_quality_cache:
+            print(f"[CACHE] Using cached evaluation")
+            return self.move_quality_cache[cache_key]
+        
+        board = chess.Board(fen)
+        chess_moves = []
+        for move_str in legal_moves:
+            try:
+                move = chess.Move.from_uci(move_str)
+                if move in board.legal_moves:
+                    chess_moves.append(move)
+            except ValueError:
+                continue
+        
+        if not chess_moves:
+            return {}
+        
+        move_scores = {}
+        num_moves = len(chess_moves)
+        
+        # Use MultiPV to analyze all moves simultaneously
+        print(f"[MULTIPV] Analyzing {num_moves} moves with MultiPV...")
+        
+        # Start at depth 1 and progressively deepen
+        max_depth = self.search_depth if self.search_depth else 14
+        
+        for current_depth in range(1, max_depth + 1):
+            try:
+                # Set MultiPV to number of moves
+                self.engine.configure({"MultiPV": num_moves})
+                
+                # Analyze at current depth
+                limit = chess.engine.Limit(depth=current_depth)
+                if self.search_time and current_depth == max_depth:
+                    limit = chess.engine.Limit(depth=current_depth, time=self.search_time)
+                
+                info = self.engine.analyse(board, limit, multipv=num_moves)
+                
+                # Extract scores for each move
+                if isinstance(info, list):
+                    for pv_info in info:
+                        pv = pv_info.get("pv", [])
+                        if pv:
+                            move = pv[0]
+                            score = pv_info["score"].white().score(mate_score=10000)
+                            move_scores[move.uci()] = float(score)
+                else:
+                    pv = info.get("pv", [])
+                    if pv:
+                        move = pv[0]
+                        score = info["score"].white().score(mate_score=10000)
+                        move_scores[move.uci()] = float(score)
+                
+                # Show intermediate results
+                if current_depth == 1 or current_depth % 3 == 0 or current_depth == max_depth:
+                    print(f"[DEPTH {current_depth}] {len(move_scores)} moves evaluated")
+                    
+                    # Update UI with current results
+                    if move_scores:
+                        best_overall, best_score = self._score_moves(self.current_fen, self.current_legal_moves)
+                        turn = "white" if board.turn == chess.WHITE else "black"
+                        
+                        temp_qualities = {}
+                        for move, score in move_scores.items():
+                            cp_loss = abs(best_score - score)
+                            quality = MoveQuality.classify(cp_loss)
+                            temp_qualities[move] = quality
+                        
+                        # Update UI immediately
+                        await self._show_move_qualities(temp_qualities)
+                
+            except Exception as e:
+                print(f"[ERROR] Depth {current_depth} failed: {e}")
+                break
+        
+        # Reset MultiPV
+        try:
+            self.engine.configure({"MultiPV": 1})
+        except:
+            pass
+        
+        # Cache final results
+        self.move_quality_cache[cache_key] = move_scores
+        return move_scores
     
     async def _evaluate_all_moves(self, fen: str, legal_moves: List[str]) -> Dict[str, float]:
         """Evaluate specific moves and return scores."""
@@ -525,7 +614,7 @@ class AdvancedAssistant:
         return threats
     
     async def _highlight_best_move(self, uci_move: str, score: float):
-        """Highlight best move with green borders."""
+        """Highlight best move with green arrow and borders."""
         if not self.page:
             return
         
@@ -538,9 +627,15 @@ class AdvancedAssistant:
                     if (window.assistantHighlightBest) {{
                         window.assistantHighlightBest('{start}', '{stop}');
                     }}
+                    if (window.assistantShowBestArrow) {{
+                        window.assistantShowBestArrow('{start}', '{stop}');
+                    }}
                 }}
             """)
             print(f"[HIGHLIGHT] Best: {start} -> {stop}")
+            
+            if self.auto_play:
+                await self._auto_play_move(uci_move)
         except Exception as e:
             print(f"[ERROR] Failed to highlight best move: {e}")
     
@@ -575,6 +670,14 @@ class AdvancedAssistant:
             return
         
         try:
+            await self.page.evaluate("""
+                () => {
+                    if (window.assistantClearArrows) {
+                        window.assistantClearArrows();
+                    }
+                }
+            """)
+            
             await self.page.evaluate(f"""
                 (threats) => {{
                     if (window.assistantShowThreats) {{
@@ -586,6 +689,37 @@ class AdvancedAssistant:
             print(f"[THREATS] Showing {len(threats)} threats")
         except Exception as e:
             print(f"[ERROR] Failed to show threats: {e}")
+    
+    async def _auto_play_move(self, uci_move: str):
+        """Auto-play the best move."""
+        if not self.page:
+            return
+        
+        start = uci_move[:2].upper()
+        stop = uci_move[2:4].upper()
+        
+        try:
+            print(f"[AUTO-PLAY] Making move: {start} -> {stop}")
+            
+            await self.page.evaluate(f"""
+                () => {{
+                    const startSq = document.querySelector('.square[data-square="{start}"]');
+                    if (startSq) startSq.click();
+                }}
+            """)
+            
+            await asyncio.sleep(0.2)
+            
+            await self.page.evaluate(f"""
+                () => {{
+                    const stopSq = document.querySelector('.square[data-square="{stop}"]');
+                    if (stopSq) stopSq.click();
+                }}
+            """)
+            
+            print(f"[AUTO-PLAY] Move executed")
+        except Exception as e:
+            print(f"[ERROR] Auto-play failed: {e}")
     
     async def _clear_all_overlays(self):
         """Clear all visual overlays."""
