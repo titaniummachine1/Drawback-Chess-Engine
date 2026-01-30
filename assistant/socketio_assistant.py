@@ -90,6 +90,14 @@ class SocketIOAssistant:
         self.latest_state = {}
         self.last_highlighted_fen = None
         self.shutdown_requested = False
+        self.game_result = None
+        
+        # Assistant configuration
+        self.show_for_player = True
+        self.show_for_opponent = False
+        self.search_depth = 14
+        self.search_time = None  # None = no time limit
+        self.move_cache = {}  # Cache for move evaluations
         
     async def run(self, url: str) -> None:
         async with async_playwright() as playwright:
@@ -240,13 +248,27 @@ class SocketIOAssistant:
         board_state = game_data.get('board')
         turn = game_data.get('turn')
         ply = game_data.get('ply', 0)
+        result = game_data.get('result')
+        
+        # Update game result and clear highlights if game ended
+        if result and result != self.game_result:
+            self.game_result = result
+            print(f"[GAME] Game ended: {result}")
+            await self._clear_highlights()
+            return
         
         if not board_state or not turn or not self.player_color:
             print(f"[DEBUG] Incomplete data: board={bool(board_state)}, turn={turn}, player={self.player_color}")
             return
         
-        if turn != self.player_color:
-            print(f"[DEBUG] Waiting for your turn (current: {turn})")
+        # Check if we should show assistance for this turn
+        should_assist = (
+            (turn == self.player_color and self.show_for_player) or
+            (turn != self.player_color and self.show_for_opponent)
+        )
+        
+        if not should_assist:
+            print(f"[DEBUG] Not showing assistance (turn={turn}, player={self.player_color}, show_player={self.show_for_player}, show_opp={self.show_for_opponent})")
             return
         
         current_moves = game_data.get('moves', {})
@@ -332,6 +354,8 @@ class SocketIOAssistant:
                     self.game_id = game_id
                     self.last_highlighted_fen = None
                     self.latest_state = {}
+                    self.game_result = None
+                    self.move_cache.clear()
                     if self.secondary_browser:
                         await self.secondary_browser.close()
                         self.secondary_browser = None
@@ -350,6 +374,11 @@ class SocketIOAssistant:
             print(f"[ERROR] Failed to process response: {e}")
     
     def _score_moves(self, fen: str, uci_moves: List[str]):
+        # Check cache first
+        cache_key = f"{fen}:{','.join(sorted(uci_moves))}"
+        if cache_key in self.move_cache:
+            return self.move_cache[cache_key]
+        
         board = chess.Board(fen)
         moves = []
         for move_str in uci_moves:
@@ -360,13 +389,24 @@ class SocketIOAssistant:
         if not moves:
             return None, 0.0
         
-        limit = chess.engine.Limit(depth=14)
+        # Build limit with depth and/or time
+        limit_kwargs = {}
+        if self.search_depth:
+            limit_kwargs['depth'] = self.search_depth
+        if self.search_time:
+            limit_kwargs['time'] = self.search_time
+        
+        limit = chess.engine.Limit(**limit_kwargs) if limit_kwargs else chess.engine.Limit(depth=14)
         info = self.engine.analyse(board, limit, root_moves=moves)
         move = info.get("pv", [None])[0]
         if move is None:
             return None, 0.0
         score = info["score"].white().score(mate_score=10000)
-        return move.uci(), float(score)
+        result = (move.uci(), float(score))
+        
+        # Cache result
+        self.move_cache[cache_key] = result
+        return result
     
     async def _ensure_overlay(self, page):
         board_selector = self.selectors["board_root"]
@@ -468,6 +508,10 @@ class SocketIOAssistant:
     highlightSquare(stop);
   }};
   
+  window.assistantClearHighlights = () => {{
+    clearHighlights();
+  }};
+  
   console.log('ASSIST: Overlay injected successfully');
 }})();
 """
@@ -475,6 +519,17 @@ class SocketIOAssistant:
             await page.add_script_tag(content=js_helper)
         except Exception as e:
             print(f"[WARN] Failed to inject overlay: {e}")
+    
+    async def _clear_highlights(self):
+        """Clear all highlights from the board."""
+        if not self.page:
+            return
+        
+        try:
+            await self.page.evaluate("() => window.assistantClearHighlights && window.assistantClearHighlights()")
+            print(f"[DEBUG] Cleared all highlights")
+        except Exception as e:
+            print(f"[DEBUG] Failed to clear highlights: {e}")
     
     async def _highlight_move(self, uci_move: str, score: float):
         if not self.page:
