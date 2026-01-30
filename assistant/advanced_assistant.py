@@ -109,7 +109,7 @@ class MoveQuality:
 
 
 class AdvancedAssistant:
-    def __init__(self, engine_path: Optional[Path] = None, dual_browser: bool = True):
+    def __init__(self, engine_path: Optional[Path] = None, dual_browser: bool = False):
         self.selectors = load_selectors()
         self.engine_path = engine_path or detect_engine()
         self.engine = chess.engine.SimpleEngine.popen_uci(str(self.engine_path))
@@ -136,7 +136,10 @@ class AdvancedAssistant:
         self.shutdown_requested = False
         self.game_result = None
         
-        # Advanced features configuration
+        # Settings file
+        self.settings_file = REPO_ROOT / "assistant" / "settings.json"
+        
+        # Advanced features configuration (defaults, will be overridden by settings file)
         self.show_for_player = True
         self.show_for_opponent = False
         self.show_move_quality = False  # Heatmap (piece selection)
@@ -152,6 +155,9 @@ class AdvancedAssistant:
         self.threat_cache = {}
         self.response_cache = {}
         
+        # Load saved settings
+        self._load_settings()
+        
         # Current analysis state
         self.current_legal_moves = []
         self.current_move_evaluations = {}
@@ -162,8 +168,14 @@ class AdvancedAssistant:
     async def run(self, url: str) -> None:
         async with async_playwright() as playwright:
             self.playwright = playwright
-            self.browser = await playwright.chromium.launch(headless=False)
-            context = await self.browser.new_context()
+            self.browser = await playwright.chromium.launch(
+                headless=False,
+                args=['--start-maximized']
+            )
+            context = await self.browser.new_context(
+                viewport=None,
+                no_viewport=True
+            )
             self.page = await context.new_page()
             
             self.page.on("response", lambda res: asyncio.create_task(self._handle_response(res)))
@@ -246,12 +258,17 @@ class AdvancedAssistant:
         return (time.monotonic() - self.last_socket_failure) > 5
 
     async def _ensure_dual_browser(self, context) -> None:
-        if not self.game_id or not self.player_color or not self.playwright:
+        if not self.game_id or not self.player_color or not self.playwright or self.secondary_page:
             return
 
         opposite_color = "black" if self.player_color == "white" else "white"
         url = f"https://www.drawbackchess.com/game/{self.game_id}/{opposite_color}"
         
+        # Check if opponent is already present via state
+        if self.latest_state and self.latest_state.get('game', {}).get('opponent_present'):
+            print(f"[ASSIST] Opponent already present, skipping dual browser")
+            return
+
         print(f"[ASSIST] Launching separate browser for opposite color...")
         self.secondary_browser = await self.playwright.chromium.launch(headless=False)
         secondary_context = await self.secondary_browser.new_context()
@@ -375,13 +392,23 @@ class AdvancedAssistant:
         """Fast analysis - only find best move and threats."""
         print(f"[ANALYSIS] Fast analysis...")
         
-        # 1. Find best move only (single evaluation)
-        best_move, best_score = self._score_moves(fen, legal_moves)
+        # 1. Check for immediate King capture (M1) - Non-Negotiable in Drawback
+        king_capture_move = self._find_king_capture(fen, legal_moves)
+        if king_capture_move:
+            print(f"[ASSIST] King capture detected! Move: {king_capture_move}")
+            best_move = king_capture_move
+            best_score = 10000.0 # Mate score
+        else:
+            # Find best move from engine
+            best_move, best_score = self._score_moves(fen, legal_moves)
         
         if not best_move:
             return
         
         print(f"[ASSIST] Best move: {best_move} ({best_score:.2f} cp)")
+        
+        # Update eval bar
+        await self._update_eval_bar(best_score, turn)
         
         # 2. Detect threats (cached)
         threats = await self._detect_threats(fen, turn)
@@ -394,9 +421,41 @@ class AdvancedAssistant:
         if self.show_threats and threats:
             await self._show_threats(threats)
         
+        # Auto-play if enabled
+        if self.auto_play and best_move:
+            await self._auto_play_move(best_move)
+        
         # 4. Log analysis
         parsed = PacketParser.parse_game_state({'game': {'board': board_state, 'turn': turn, 'ply': 0}, 'success': True})
         await self._record_analysis(parsed, best_move, best_score, {}, threats)
+
+    def _find_king_capture(self, fen: str, legal_moves: List[str]) -> Optional[str]:
+        """Check if any legal move captures the opponent's king."""
+        board = chess.Board(fen)
+        for move_uci in legal_moves:
+            try:
+                move = chess.Move.from_uci(move_uci)
+                target_piece = board.piece_at(move.to_square)
+                if target_piece and target_piece.piece_type == chess.KING:
+                    return move_uci
+            except:
+                continue
+        return None
+
+    async def _update_eval_bar(self, score: float, turn: str):
+        """Update the visual eval bar on the page."""
+        if not self.page:
+            return
+        
+        # Convert score to percentage (0-100) where 50 is even
+        # Cap at +/- 1000cp (10 points)
+        capped_score = max(-1000, min(1000, score))
+        percentage = 50 + (capped_score / 20) # 1000cp -> 100%, -1000cp -> 0%
+        
+        # If it's black's turn to move, score is from white's perspective usually
+        # but our _score_moves uses white().score()
+        
+        await self.page.evaluate(f"if(window.assistantUpdateEval) window.assistantUpdateEval({percentage}, {score});")
     
     async def _analyze_selected_piece(self, square: str):
         """Analyze moves for a specific piece with progressive deepening."""
@@ -733,15 +792,95 @@ class AdvancedAssistant:
                         await self._clear_all_overlays()
                 self.search_depth = settings['depth']
                 self.search_time = settings['time']
+                
+                # Save settings to file
+                self._save_settings()
         except Exception as e:
             pass
     
+    def _load_settings(self):
+        """Load settings from JSON file."""
+        try:
+            if self.settings_file.exists():
+                with open(self.settings_file, 'r') as f:
+                    settings = json.load(f)
+                    self.show_for_player = settings.get('show_for_player', True)
+                    self.show_for_opponent = settings.get('show_for_opponent', False)
+                    self.show_move_quality = settings.get('show_move_quality', False)
+                    self.show_threats = settings.get('show_threats', True)
+                    self.show_best_move = settings.get('show_best_move', True)
+                    self.auto_play = settings.get('auto_play', False)
+                    self.search_depth = settings.get('search_depth', 14)
+                    self.search_time = settings.get('search_time', 2.0)
+                    print(f"[SETTINGS] Loaded from {self.settings_file}")
+        except Exception as e:
+            print(f"[SETTINGS] Failed to load: {e}")
+    
+    def _save_settings(self):
+        """Save settings to JSON file."""
+        try:
+            settings = {
+                'show_for_player': self.show_for_player,
+                'show_for_opponent': self.show_for_opponent,
+                'show_move_quality': self.show_move_quality,
+                'show_threats': self.show_threats,
+                'show_best_move': self.show_best_move,
+                'auto_play': self.auto_play,
+                'search_depth': self.search_depth,
+                'search_time': self.search_time
+            }
+            with open(self.settings_file, 'w') as f:
+                json.dump(settings, f, indent=2)
+        except Exception as e:
+            print(f"[SETTINGS] Failed to save: {e}")
+    
+    async def _handle_hover(self, square: str):
+        """Handle square hover to show opponent's best response."""
+        if not square or not self.current_fen or not self.current_legal_moves:
+            # Clear response arrow if not hovering
+            await self.page.evaluate("if(window.assistantShowOpponentResponse) window.assistantShowOpponentResponse(null, null);")
+            return
+
+        # Find legal moves starting from this square
+        square_moves = [m for m in self.current_legal_moves if m[:2].upper() == square.upper()]
+        if not square_moves:
+            return
+
+        # For simplicity, we'll use the first legal move from this square or a cached one
+        # Ideally, we would track which move the user is actually hovering over if possible
+        move_to_analyze = square_moves[0]
+        
+        # Analyze opponent's best response after this move
+        board = chess.Board(self.current_fen)
+        try:
+            move = chess.Move.from_uci(move_to_analyze)
+            if move in board.legal_moves:
+                board.push(move)
+                
+                # Fast evaluation for opponent response
+                limit = chess.engine.Limit(depth=10, time=0.1)
+                result = self.engine.play(board, limit)
+                
+                if result.move:
+                    start_sq = result.move.uci()[:2].upper()
+                    stop_sq = result.move.uci()[2:4].upper()
+                    await self.page.evaluate(f"if(window.assistantShowOpponentResponse) window.assistantShowOpponentResponse('{start_sq}', '{stop_sq}');")
+        except Exception as e:
+            pass
+
     async def _check_piece_selection(self):
         """Check if user selected a piece for analysis."""
         if not self.page or not self.current_fen or not self.show_move_quality:
             return
         
         try:
+            # Check for hover state first
+            hovered = await self.page.evaluate("window.assistantHoveredSquare || null")
+            if hovered:
+                await self._handle_hover(hovered)
+            else:
+                await self._handle_hover(None)
+
             selected = await self.page.evaluate("""
                 () => {
                     if (window.assistantGetSelectedSquare) {
@@ -766,33 +905,43 @@ class AdvancedAssistant:
             pass
     
     async def _auto_play_move(self, uci_move: str):
-        """Auto-play the best move."""
-        if not self.page:
+        """Auto-play the best move via HTTP POST to /move endpoint."""
+        if not self.page or not self.game_id or not self.username or not self.player_color or not self.port:
+            print(f"[AUTO-PLAY] Missing required data for move submission")
             return
         
         start = uci_move[:2].upper()
         stop = uci_move[2:4].upper()
+        promotion = uci_move[4:5].upper() if len(uci_move) > 4 else None
         
         try:
-            print(f"[AUTO-PLAY] Making move: {start} -> {stop}")
+            print(f"[AUTO-PLAY] Submitting move via HTTP: {start} -> {stop}")
             
-            await self.page.evaluate(f"""
-                () => {{
-                    const startSq = document.querySelector('.square[data-square="{start}"]');
-                    if (startSq) startSq.click();
-                }}
-            """)
+            # Build the move submission payload
+            payload = {
+                'id': self.game_id,
+                'color': self.player_color,
+                'username': self.username,
+                'start': start,
+                'stop': stop
+            }
             
-            await asyncio.sleep(0.2)
+            if promotion:
+                payload['promotion'] = promotion
             
-            await self.page.evaluate(f"""
-                () => {{
-                    const stopSq = document.querySelector('.square[data-square="{stop}"]');
-                    if (stopSq) stopSq.click();
-                }}
-            """)
+            # Submit move via HTTP POST
+            url = f"https://www.drawbackchess.com/app{self.port - 5000}/move"
+            response = await self.page.request.post(url, data=payload)
             
-            print(f"[AUTO-PLAY] Move executed")
+            if response.ok:
+                result = await response.json()
+                if result.get('success'):
+                    print(f"[AUTO-PLAY] Move submitted successfully")
+                else:
+                    print(f"[AUTO-PLAY] Move rejected: {result.get('error', 'Unknown error')}")
+            else:
+                print(f"[AUTO-PLAY] HTTP error: {response.status}")
+                
         except Exception as e:
             print(f"[ERROR] Auto-play failed: {e}")
     
@@ -963,7 +1112,12 @@ class AdvancedAssistant:
         
         try:
             await page.add_script_tag(content=js_code)
-            print(f"[ASSIST] Advanced overlay injected successfully")
+            # Verify injection worked
+            is_now_injected = await page.evaluate("() => !!window.assistantAdvanced")
+            if is_now_injected:
+                print(f"[ASSIST] Advanced overlay injected successfully")
+            else:
+                print(f"[WARN] Overlay injection may have failed - flag not set")
         except Exception as e:
             print(f"[WARN] Failed to inject overlay: {e}")
     
@@ -980,13 +1134,18 @@ class AdvancedAssistant:
   const ensureSquareIds = () => {{
     const squares = Array.from(root.querySelectorAll('.square'));
     if (!squares.length) return false;
+    
+    // Fix for board scaling: Ensure board container allows overflow for eval bar
+    root.style.overflow = 'visible';
+    if (root.parentElement) root.parentElement.style.overflow = 'visible';
+
     const files = ['a','b','c','d','e','f','g','h'];
     for (let idx = 0; idx < squares.length; idx++) {{
       const sq = squares[idx];
       if (!sq.dataset.square) {{
         const file = files[idx % 8];
         const rank = 8 - Math.floor(idx / 8);
-        sq.dataset.square = `${{file}}${{rank}}`.toUpperCase();
+        sq.dataset.square = `{{file}}{{rank}}`.toUpperCase();
       }}
     }}
     return true;
@@ -1019,29 +1178,124 @@ class AdvancedAssistant:
       pointer-events: none;
       z-index: 9998;
     }}
+
+    #assistant-eval-bar-container {{
+      position: absolute;
+      left: -40px;
+      top: 0;
+      bottom: 0;
+      width: 30px;
+      background: #403d39;
+      border: 2px solid #2b2925;
+      border-radius: 4px;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column-reverse;
+      z-index: 10001;
+    }}
+
+    #assistant-eval-bar-fill {{
+      width: 100%;
+      height: 50%;
+      background: #ffffff;
+      transition: height 0.5s ease-in-out;
+    }}
+
+    .assistant-eval-text {{
+      position: absolute;
+      left: 50%;
+      transform: translateX(-50%);
+      font-size: 10px;
+      font-weight: bold;
+      color: #000;
+      z-index: 10002;
+      pointer-events: none;
+    }}
   `;
   document.head.appendChild(style);
+
+  // Add eval bar to board root
+  const injectEvalBar = () => {{
+    if (document.getElementById('assistant-eval-bar-container')) return;
+    const container = document.createElement('div');
+    container.id = 'assistant-eval-bar-container';
+    
+    const fill = document.createElement('div');
+    fill.id = 'assistant-eval-bar-fill';
+    
+    const text = document.createElement('div');
+    text.className = 'assistant-eval-text';
+    text.id = 'assistant-eval-text-val';
+    text.style.bottom = '10px';
+    text.textContent = '0.0';
+    
+    container.appendChild(fill);
+    container.appendChild(text);
+    root.appendChild(container);
+  }};
   
+  injectEvalBar();
+
+  window.assistantUpdateEval = (percentage, score) => {{
+    const fill = document.getElementById('assistant-eval-bar-fill');
+    const text = document.getElementById('assistant-eval-text-val');
+    if (fill) fill.style.height = percentage + '%';
+    if (text) {{
+      text.textContent = (score / 100).toFixed(1);
+      text.style.color = percentage > 50 ? '#000' : '#fff';
+      text.style.bottom = percentage > 50 ? '10px' : 'auto';
+      text.style.top = percentage <= 50 ? '10px' : 'auto';
+    }}
+  }};
+
   // Clear functions
   const clearBestHighlight = () => {{
     document.querySelectorAll('.assistant-best-highlight').forEach(el => el.remove());
+    document.querySelectorAll('.assistant-best-arrow').forEach(el => el.remove());
+    document.querySelectorAll('.assistant-opponent-response-arrow').forEach(el => el.remove());
   }};
-  
+
   const clearQualityOverlays = () => {{
     document.querySelectorAll('.assistant-quality-overlay').forEach(el => el.remove());
   }};
-  
+
   const clearThreatArrows = () => {{
     document.querySelectorAll('.assistant-threat-arrow').forEach(el => el.remove());
   }};
+
+  window.assistantClearAll = () => {{
+    clearBestHighlight();
+    clearQualityOverlays();
+    clearThreatArrows();
+  }};
+
+  // Track hovered square for opponent response
+  window.assistantHoveredSquare = null;
   
+  const setupHoverListeners = () => {{
+    root.querySelectorAll('.square').forEach(sq => {{
+      sq.addEventListener('mouseenter', () => {{
+        window.assistantHoveredSquare = sq.dataset.square;
+      }});
+      sq.addEventListener('mouseleave', () => {{
+        window.assistantHoveredSquare = null;
+      }});
+    }});
+  }};
+  
+  setupHoverListeners();
+
   // Highlight best move
   window.assistantHighlightBest = (start, stop) => {{
     ensureSquareIds();
-    clearBestHighlight();
+    // Only clear best highlight, not threats
+    document.querySelectorAll('.assistant-best-highlight').forEach(el => el.remove());
+    document.querySelectorAll('.assistant-best-arrow').forEach(el => el.remove());
+    
+    drawArrow(start, stop, '#00ff00', 'assistant-best-arrow');
     
     [start, stop].forEach(sq => {{
-      const target = root.querySelector(`.square[data-square="${{sq}}"]`);
+      const target = root.querySelector(`.square[data-square="{{sq}}"]`);
       if (!target) return;
       
       const computedStyle = window.getComputedStyle(target);
@@ -1054,6 +1308,14 @@ class AdvancedAssistant:
       target.appendChild(overlay);
     }});
   }};
+
+  // Show opponent response arrow
+  window.assistantShowOpponentResponse = (start, stop) => {{
+    document.querySelectorAll('.assistant-opponent-response-arrow').forEach(el => el.remove());
+    if (start && stop) {{
+      drawArrow(start, stop, '#ff4444', 'assistant-opponent-response-arrow');
+    }}
+  }};
   
   // Show move quality overlays
   window.assistantShowQualities = (qualityData) => {{
@@ -1061,7 +1323,7 @@ class AdvancedAssistant:
     clearQualityOverlays();
     
     Object.entries(qualityData).forEach(([square, data]) => {{
-      const target = root.querySelector(`.square[data-square="${{square}}"]`);
+      const target = root.querySelector(`.square[data-square="{{square}}"]`);
       if (!target) return;
       
       const computedStyle = window.getComputedStyle(target);
@@ -1097,8 +1359,8 @@ class AdvancedAssistant:
   
   // Draw arrow between two squares
   const drawArrow = (fromSquare, toSquare, color, className) => {{
-    const fromEl = root.querySelector(`.square[data-square="${{fromSquare}}"]`);
-    const toEl = root.querySelector(`.square[data-square="${{toSquare}}"]`);
+    const fromEl = root.querySelector(`.square[data-square="{{fromSquare}}"]`);
+    const toEl = root.querySelector(`.square[data-square="{{toSquare}}"]`);
     if (!fromEl || !toEl) return;
     
     const fromRect = fromEl.getBoundingClientRect();
@@ -1108,7 +1370,10 @@ class AdvancedAssistant:
     const to = getEdgePoint(toRect, fromRect);
     
     const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-    svg.className = className;
+    svg.classList.add(className);
+    if (className === 'assistant-best-arrow') {{
+      svg.classList.add('assistant-arrow-layer');
+    }}
     svg.dataset.assistantArrow = 'true';
     svg.style.position = 'fixed';
     svg.style.top = '0';
@@ -1120,17 +1385,19 @@ class AdvancedAssistant:
     
     const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
     const markerId = 'arrow-' + color.replace('#', '') + '-' + Math.random();
+    
     const marker = document.createElementNS('http://www.w3.org/2000/svg', 'marker');
     marker.setAttribute('id', markerId);
     marker.setAttribute('markerWidth', '10');
-    marker.setAttribute('markerHeight', '10');
-    marker.setAttribute('refX', '5');
-    marker.setAttribute('refY', '5');
+    marker.setAttribute('markerHeight', '7');
+    marker.setAttribute('refX', '9');
+    marker.setAttribute('refY', '3.5');
     marker.setAttribute('orient', 'auto');
     
     const polygon = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
-    polygon.setAttribute('points', '0 0, 10 5, 0 10');
+    polygon.setAttribute('points', '0 0, 10 3.5, 0 7');
     polygon.setAttribute('fill', color);
+    
     marker.appendChild(polygon);
     defs.appendChild(marker);
     svg.appendChild(defs);
@@ -1142,10 +1409,10 @@ class AdvancedAssistant:
     line.setAttribute('y2', to.y);
     line.setAttribute('stroke', color);
     line.setAttribute('stroke-width', '5');
-    line.setAttribute('marker-end', `url(#${{markerId}})`);
+    line.setAttribute('marker-end', `url(#{{markerId}})`);
     line.setAttribute('opacity', '0.8');
-    svg.appendChild(line);
     
+    svg.appendChild(line);
     document.body.appendChild(svg);
   }};
   
@@ -1157,14 +1424,6 @@ class AdvancedAssistant:
     }});
   }};
   
-  // Show best move arrow
-  window.assistantShowBestArrow = (start, stop) => {{
-    ensureSquareIds();
-    drawArrow(start, stop, '#00ff00', 'assistant-best-arrow');
-  }};
-  
-  // Clear all arrows
-  window.assistantClearArrows = () => {{
     document.querySelectorAll('.assistant-threat-arrow').forEach(el => el.remove());
     document.querySelectorAll('.assistant-best-arrow').forEach(el => el.remove());
   }};
@@ -1229,6 +1488,7 @@ class AdvancedAssistant:
   console.log('ASSIST: Advanced overlay system ready');
 }})();
 """
+    
     
     async def _ensure_ui_panel(self, page):
         """Inject UI control panel."""
@@ -1330,11 +1590,11 @@ def main():
     
     parser = argparse.ArgumentParser(description="Advanced Drawback Chess Assistant")
     parser.add_argument("url", nargs="?", default="https://www.drawbackchess.com", help="Game URL")
-    parser.add_argument("--dual-browser", action="store_true", default=True, help="Open opposite color window")
-    parser.add_argument("--no-dual-browser", action="store_true", help="Disable opposite color window")
+    parser.add_argument("--engine", type=str, help="Path to chess engine")
+    parser.add_argument("--dual-browser", action="store_true", default=False, help="Open separate browser for opposite color (for self-play)")
     args = parser.parse_args()
     
-    dual_browser = args.dual_browser and not args.no_dual_browser
+    dual_browser = args.dual_browser
     assistant = AdvancedAssistant(dual_browser=dual_browser)
     
     try:
