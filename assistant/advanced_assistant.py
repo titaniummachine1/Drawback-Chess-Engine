@@ -41,14 +41,19 @@ def load_selectors() -> Dict[str, str]:
 
 
 def detect_engine() -> Path:
+    # Prioritize Fairy-Stockfish for Drawback Chess variant support
     candidates = [
+        REPO_ROOT / "engines" / "fairy-stockfish_x86-64.exe",
+        REPO_ROOT / "engines" / "fairy-stockfish.exe",
+        REPO_ROOT / "engines" / "fairy-stockfish",
         REPO_ROOT / "engines" / "stockfish.exe",
         REPO_ROOT / "engines" / "stockfish",
     ]
     for candidate in candidates:
         if candidate.exists():
+            print(f"[ENGINE] Using: {candidate.name}")
             return candidate
-    raise FileNotFoundError("No Stockfish binary found in engines/ directory")
+    raise FileNotFoundError("No chess engine found in engines/ directory. Please install fairy-stockfish")
 
 
 def calculate_port(game_id: str) -> int:
@@ -440,7 +445,10 @@ class AdvancedAssistant:
         moves = []
         for move_str in uci_moves:
             try:
-                moves.append(chess.Move.from_uci(move_str))
+                # For Drawback Chess, ignore standard chess move validation
+                # Just ensure the UCI format is valid
+                move = chess.Move.from_uci(move_str)
+                moves.append(move)
             except ValueError:
                 continue
         if not moves:
