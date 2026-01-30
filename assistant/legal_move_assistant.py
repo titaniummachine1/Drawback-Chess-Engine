@@ -61,6 +61,8 @@ class LegalMoveAssistant:
         self.latest_state = {}
         self.player_color = None
         self.last_highlighted_fen = None
+        self.game_id = None
+        self.polling_task = None
 
     async def run(self, url: str) -> None:
         async with async_playwright() as playwright:
@@ -81,6 +83,8 @@ class LegalMoveAssistant:
             except asyncio.CancelledError:
                 pass
             finally:
+                if self.polling_task:
+                    self.polling_task.cancel()
                 await context.close()
         self.engine.close()
 
@@ -107,14 +111,39 @@ class LegalMoveAssistant:
             body = await response.text()
             data = json.loads(body)
             
-            if isinstance(data, dict) and "game" in data:
+            if isinstance(data, dict) and "game" in data and data.get("success"):
                 print(f"[DEBUG] HTTP response from {url}")
                 
-                if self.player_color is None and "color" in data:
-                    self.player_color = data["color"]
-                    print(f"[ASSIST] Detected player color: {self.player_color}")
+                if self.player_color is None:
+                    if "color" in data:
+                        self.player_color = data["color"]
+                        print(f"[ASSIST] Detected player color: {self.player_color}")
+                    elif "/game?" in url and "color=" in url:
+                        import re
+                        match = re.search(r"color=(\w+)", url)
+                        if match:
+                            self.player_color = match.group(1)
+                            print(f"[ASSIST] Detected player color from URL: {self.player_color}")
+                
+                game_id = data.get("game", {}).get("id")
+                if not game_id and "/game?" in url and "id=" in url:
+                    import re
+                    match = re.search(r"id=([a-f0-9]+)", url)
+                    if match:
+                        game_id = match.group(1)
+                
+                if game_id and game_id != self.game_id:
+                    if self.game_id:
+                        print(f"[ASSIST] New game detected: {game_id} (was {self.game_id})")
+                    else:
+                        print(f"[ASSIST] Detected game ID: {game_id}")
+                    self.game_id = game_id
+                    self.last_highlighted_fen = None
+                    self.latest_state = {}
                 
                 await self._process_game_data(data)
+        except json.JSONDecodeError:
+            pass
         except Exception as e:
             print(f"[ERROR] Failed to process response from {url}: {e}")
 
@@ -124,10 +153,12 @@ class LegalMoveAssistant:
         except json.JSONDecodeError:
             return
 
-        if not isinstance(data, dict) or "game" not in data:
+        if not isinstance(data, dict) or "game" not in data or not data.get("success"):
             return
 
-        print("[DEBUG] WebSocket packet received")
+        ply = data.get("game", {}).get("ply", "?")
+        turn = data.get("game", {}).get("turn", "?")
+        print(f"[DEBUG] WebSocket packet: ply={ply}, turn={turn}")
         await self._process_game_data(data)
 
     async def _process_game_data(self, data: dict) -> None:
@@ -184,6 +215,57 @@ class LegalMoveAssistant:
         print(f"[DEBUG] Highlight attempted for {best_move}")
         
         self.last_highlighted_fen = fen
+    
+    async def _poll_game_state(self):
+        """Actively poll game state for AI games where opponent moves don't trigger HTTP responses"""
+        print(f"[ASSIST] Starting active polling for game {self.game_id}")
+        
+        import random
+        poll_count = 0
+        last_ply = None
+        
+        while True:
+            try:
+                await asyncio.sleep(2)
+                poll_count += 1
+                
+                if not self.page or not self.game_id or not self.player_color:
+                    print(f"[POLL #{poll_count}] Skipping: page/game_id/player_color not ready")
+                    continue
+                
+                app_num = random.randint(1, 16)
+                url = f"https://www.drawbackchess.com/app{app_num}/game?id={self.game_id}&color={self.player_color}"
+                
+                try:
+                    response = await self.page.request.get(url)
+                    if response.status != 200:
+                        print(f"[POLL #{poll_count}] HTTP {response.status}")
+                        continue
+                    
+                    body = await response.text()
+                    data = json.loads(body)
+                    
+                    if isinstance(data, dict) and "game" in data and data.get("success"):
+                        ply = data.get('game', {}).get('ply', '?')
+                        turn = data.get('game', {}).get('turn', '?')
+                        
+                        if ply != last_ply:
+                            print(f"[POLL #{poll_count}] New state: ply={ply}, turn={turn}")
+                            last_ply = ply
+                            await self._process_game_data(data)
+                    else:
+                        print(f"[POLL #{poll_count}] Invalid response: success={data.get('success')}, has_game={('game' in data)}")
+                except json.JSONDecodeError as e:
+                    print(f"[POLL #{poll_count}] JSON decode failed: {e}")
+                except Exception as e:
+                    print(f"[POLL #{poll_count}] Request failed: {e}")
+                    
+            except asyncio.CancelledError:
+                print(f"[ASSIST] Polling stopped after {poll_count} polls")
+                break
+            except Exception as e:
+                print(f"[ERROR] Polling error: {e}")
+                await asyncio.sleep(5)
 
     def _score_moves(self, fen: str, uci_moves: List[str]):
         board = chess.Board(fen)

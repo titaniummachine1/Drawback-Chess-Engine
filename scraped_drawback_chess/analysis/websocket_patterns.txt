@@ -1,0 +1,46 @@
+socket.io/docs/v3/migrating-from-2-x-to-3-0/)"))
+socket.io",this.opts=n,yt(this,n),this.reconnection(!1!==n.reconnection),this.reconnectionAttempts(n.reconnectionAttempts||1/0),this.reconnectionDelay(n.reconnectionDelay||1e3),this.reconnectionDelayMax(n.reconnectionDelayMax||5e3),this.randomizationFactor(null!==(r=n.randomizationFactor)&&void 0!==r?r:.5),this.backoff=new pn({min:this.reconnectionDelay(),max:this.reconnectionDelayMax(),jitter:this.randomizationFactor()}),this.timeout(null==n.timeout?2e4:n.timeout),this._readyState="closed",this.uri=t
+socket.io"),r=n.source,o=n.id,a=n.path,i=hn[o]&&a in hn[o].nsps
+socket.io")}))}),1e3)
+socket.io")})):(console.log({NODE_ENV:"production",PUBLIC_URL:"",WDS_SOCKET_HOST:void 0,WDS_SOCKET_PATH:void 0,WDS_SOCKET_PORT:void 0,FAST_REFRESH:!0}.REACT_APP_FULL_URL),Z(mn.connect({NODE_ENV:"production",PUBLIC_URL:"",WDS_SOCKET_HOST:void 0,WDS_SOCKET_PATH:void 0,WDS_SOCKET_PORT:void 0,FAST_REFRESH:!0}.REACT_APP_FULL_URL))))}),[T,Ue]),(0,r.useEffect)((()=>()=>{Mp("disconnecting socket"),T&&T.disconnect()}),[T]),(0,r.useEffect)((()=>{const e=localStorage.getItem("haveSeenSettingsDialog")
+socket.io")}))}),1e3)
+socket.io")}))}),1e3)
+success
+error
+data
+error
+drain
+packet
+error
+close
+connect
+challenge
+request_ack
+challenge_accepted
+success
+error
+disconnect
+update
+message
+other_message
+rematch
+new_player
+disconnect
+connect
+message
+challenge
+request_ack
+challenge_accepted
+connect
+challenge
+request_ack
+challenge_accepted
+join
+join
+join
+leave
+leave
+join
+leave
+join
+join
