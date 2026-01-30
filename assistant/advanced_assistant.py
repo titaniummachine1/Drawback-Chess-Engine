@@ -758,42 +758,51 @@ class AdvancedAssistant:
         try:
             settings = await self.page.evaluate("""
                 () => {
-                    return {
-                        autoPlay: document.getElementById('assist-auto-play')?.checked || false,
-                        showPlayer: document.getElementById('assist-show-player')?.checked || true,
-                        showOpponent: document.getElementById('assist-show-opponent')?.checked || false,
-                        showThreats: document.getElementById('assist-show-threats')?.checked || true,
-                        showBest: document.getElementById('assist-show-best')?.checked || true,
-                        showHeatmap: document.getElementById('assist-show-heatmap')?.checked || false,
-                        depth: parseInt(document.getElementById('assist-depth')?.value || '14'),
-                        time: parseFloat(document.getElementById('assist-time')?.value || '2.0')
-                    };
+                    if (!window.assistantGetSettings) return null;
+                    return window.assistantGetSettings();
                 }
             """)
             
-            if settings:
-                if self.auto_play != settings['autoPlay']:
-                    self.auto_play = settings['autoPlay']
-                    print(f"[CONFIG] Auto-play: {self.auto_play}")
-                
+            if not settings:
+                return
+            
+            settings_changed = False
+            
+            # Update settings
+            if settings.get('showPlayer') is not None and self.show_for_player != settings['showPlayer']:
                 self.show_for_player = settings['showPlayer']
+                settings_changed = True
+            if settings.get('showOpponent') is not None and self.show_for_opponent != settings['showOpponent']:
                 self.show_for_opponent = settings['showOpponent']
-                if self.show_threats != settings['showThreats']:
-                    self.show_threats = settings['showThreats']
-                    if not self.show_threats:
-                        await self._clear_all_overlays()
-                if self.show_best_move != settings['showBest']:
-                    self.show_best_move = settings['showBest']
-                    if not self.show_best_move:
-                        await self._clear_all_overlays()
-                if self.show_move_quality != settings['showHeatmap']:
-                    self.show_move_quality = settings['showHeatmap']
-                    if not self.show_move_quality:
-                        await self._clear_all_overlays()
+                settings_changed = True
+            if settings.get('autoPlay') is not None and self.auto_play != settings['autoPlay']:
+                self.auto_play = settings['autoPlay']
+                print(f"[CONFIG] Auto-play: {self.auto_play}")
+                settings_changed = True
+            if settings.get('showThreats') is not None and self.show_threats != settings['showThreats']:
+                self.show_threats = settings['showThreats']
+                if not self.show_threats:
+                    await self._clear_all_overlays()
+                settings_changed = True
+            if settings.get('showBest') is not None and self.show_best_move != settings['showBest']:
+                self.show_best_move = settings['showBest']
+                if not self.show_best_move:
+                    await self._clear_all_overlays()
+                settings_changed = True
+            if settings.get('showHeatmap') is not None and self.show_move_quality != settings['showHeatmap']:
+                self.show_move_quality = settings['showHeatmap']
+                if not self.show_move_quality:
+                    await self._clear_all_overlays()
+                settings_changed = True
+            if settings.get('depth') is not None and self.search_depth != settings['depth']:
                 self.search_depth = settings['depth']
+                settings_changed = True
+            if settings.get('time') is not None and self.search_time != settings['time']:
                 self.search_time = settings['time']
+                settings_changed = True
                 
-                # Save settings to file
+            # Save settings to file whenever they change
+            if settings_changed:
                 self._save_settings()
         except Exception as e:
             pass
@@ -929,9 +938,13 @@ class AdvancedAssistant:
             if promotion:
                 payload['promotion'] = promotion
             
-            # Submit move via HTTP POST
+            # Submit move via HTTP POST with proper JSON headers
             url = f"https://www.drawbackchess.com/app{self.port - 5000}/move"
-            response = await self.page.request.post(url, data=payload)
+            response = await self.page.request.post(
+                url,
+                data=json.dumps(payload),
+                headers={'Content-Type': 'application/json'}
+            )
             
             if response.ok:
                 result = await response.json()
@@ -1112,6 +1125,8 @@ class AdvancedAssistant:
         
         try:
             await page.add_script_tag(content=js_code)
+            # Wait a moment for script to execute
+            await asyncio.sleep(0.1)
             # Verify injection worked
             is_now_injected = await page.evaluate("() => !!window.assistantAdvanced")
             if is_now_injected:
