@@ -72,6 +72,7 @@ class SocketIOAssistant:
         self.variant_config = load_drawback_config()
         self._apply_variant_config()
         
+        self.playwright = None
         self.browser = None
         self.page = None
         self.sio = None
@@ -88,14 +89,17 @@ class SocketIOAssistant:
         
         self.latest_state = {}
         self.last_highlighted_fen = None
+        self.shutdown_requested = False
         
     async def run(self, url: str) -> None:
         async with async_playwright() as playwright:
+            self.playwright = playwright
             self.browser = await playwright.chromium.launch(headless=False)
             context = await self.browser.new_context()
             self.page = await context.new_page()
             
             self.page.on("response", lambda res: asyncio.create_task(self._handle_response(res)))
+            self.page.on("close", lambda: asyncio.create_task(self._handle_page_close()))
             
             print(f"[ASSIST] Navigating to {url}")
             await self.page.goto(url)
@@ -104,42 +108,77 @@ class SocketIOAssistant:
             
             try:
                 while True:
+                    if self.page.is_closed():
+                        print("[ASSIST] Main browser closed by user, shutting down...")
+                        break
+                    
+                    if self.secondary_page and self.secondary_page.is_closed():
+                        print("[ASSIST] Secondary browser closed by user")
+                        self.secondary_page = None
+                        if self.secondary_browser:
+                            try:
+                                await self.secondary_browser.close()
+                            except:
+                                pass
+                            self.secondary_browser = None
+                    
                     await self._ensure_overlay(self.page)
                     
                     if self.game_id and self.player_color and not self.sio and not self.socket_connecting:
                         if self._can_attempt_socket_connect():
                             await self._connect_socketio()
 
-                    if self.dual_browser and self.secondary_page is None:
+                    if self.dual_browser and self.secondary_page is None and self.game_id and self.player_color:
                         await self._ensure_dual_browser(context)
                     
                     await asyncio.sleep(1)
             except asyncio.CancelledError:
-                pass
+                print("[ASSIST] Cancelled by user")
+            except Exception as e:
+                if "Target page, context or browser has been closed" in str(e) or "Browser closed" in str(e):
+                    print("[ASSIST] Browser closed by user, shutting down...")
+                else:
+                    print(f"[ERROR] Unexpected error: {e}")
+                    raise
             finally:
+                print("[ASSIST] Cleaning up...")
                 if self.sio:
-                    await self.sio.disconnect()
+                    try:
+                        await self.sio.disconnect()
+                    except:
+                        pass
                 if self.secondary_browser:
-                    await self.secondary_browser.close()
-                await context.close()
+                    try:
+                        await self.secondary_browser.close()
+                    except:
+                        pass
+                try:
+                    await context.close()
+                except:
+                    pass
         
         self.engine.close()
+        print("[ASSIST] Shutdown complete")
 
+    async def _handle_page_close(self):
+        """Handle main page close event."""
+        print("[ASSIST] Main page closed, requesting shutdown...")
+        self.shutdown_requested = True
+    
     def _can_attempt_socket_connect(self) -> bool:
         if self.last_socket_failure is None:
             return True
         return (time.monotonic() - self.last_socket_failure) > 5
 
     async def _ensure_dual_browser(self, context) -> None:
-        if not self.game_id or not self.player_color:
+        if not self.game_id or not self.player_color or not self.playwright:
             return
 
         opposite_color = "black" if self.player_color == "white" else "white"
         url = f"https://www.drawbackchess.com/game/{self.game_id}/{opposite_color}"
         
         print(f"[ASSIST] Launching separate browser for opposite color...")
-        playwright = context._browser._playwright
-        self.secondary_browser = await playwright.chromium.launch(headless=False)
+        self.secondary_browser = await self.playwright.chromium.launch(headless=False)
         secondary_context = await self.secondary_browser.new_context()
         self.secondary_page = await secondary_context.new_page()
         
