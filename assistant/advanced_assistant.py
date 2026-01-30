@@ -134,7 +134,7 @@ class AdvancedAssistant:
         # Advanced features configuration
         self.show_for_player = True
         self.show_for_opponent = False
-        self.show_move_quality = False  # Only on piece selection
+        self.show_move_quality = False  # Heatmap (piece selection)
         self.show_threats = True
         self.show_best_move = True
         self.auto_play = False  # Auto-play best move
@@ -195,7 +195,13 @@ class AdvancedAssistant:
                     if self.dual_browser and self.secondary_page is None and self.game_id and self.player_color:
                         await self._ensure_dual_browser(context)
                     
-                    await asyncio.sleep(1)
+                    # Check for piece selections
+                    await self._check_piece_selection()
+                    
+                    # Update settings from UI
+                    await self._sync_ui_settings()
+                    
+                    await asyncio.sleep(0.5)
             except asyncio.CancelledError:
                 print("[ASSIST] Cancelled by user")
             except Exception as e:
@@ -317,6 +323,9 @@ class AdvancedAssistant:
             print(f"[DEBUG] Incomplete data")
             return
         
+        # Clear stale overlays on every update
+        await self._clear_all_overlays()
+
         # Check if we should show assistance for this turn
         should_assist = (
             (turn == self.player_color and self.show_for_player) or
@@ -325,9 +334,9 @@ class AdvancedAssistant:
         
         if not should_assist:
             await self._clear_all_overlays()
+            print(f"[DEBUG] Not showing assistance (turn={turn}, player={self.player_color}, show_player={self.show_for_player}, show_opp={self.show_for_opponent})")
             return
         
-        # Extract legal moves
         current_moves = game_data.get('moves', {})
         legal_moves = []
         for start_sq, destinations in current_moves.items():
@@ -348,6 +357,9 @@ class AdvancedAssistant:
         
         self.current_legal_moves = legal_moves
         self.current_fen = fen
+        
+        # Clear old overlays when position changes
+        await self._clear_all_overlays()
         
         # Only do lightweight analysis by default
         await self._analyze_position_fast(fen, legal_moves, board_state, turn)
@@ -476,66 +488,47 @@ class AdvancedAssistant:
         move_scores = {}
         num_moves = len(chess_moves)
         
-        # Use MultiPV to analyze all moves simultaneously
-        print(f"[MULTIPV] Analyzing {num_moves} moves with MultiPV...")
+        print(f"[PROGRESSIVE] Analyzing {num_moves} moves progressively...")
         
-        # Start at depth 1 and progressively deepen
-        max_depth = self.search_depth if self.search_depth else 14
+        # Analyze each move sequentially with progressive deepening
+        max_depth = min(self.search_depth if self.search_depth else 14, 10)
         
-        for current_depth in range(1, max_depth + 1):
-            try:
-                # Set MultiPV to number of moves
-                self.engine.configure({"MultiPV": num_moves})
+        for depth in [1, 3, 6, max_depth]:
+            if depth > max_depth:
+                continue
                 
-                # Analyze at current depth
-                limit = chess.engine.Limit(depth=current_depth)
-                if self.search_time and current_depth == max_depth:
-                    limit = chess.engine.Limit(depth=current_depth, time=self.search_time)
-                
-                info = self.engine.analyse(board, limit, multipv=num_moves)
-                
-                # Extract scores for each move
-                if isinstance(info, list):
-                    for pv_info in info:
-                        pv = pv_info.get("pv", [])
-                        if pv:
-                            move = pv[0]
-                            score = pv_info["score"].white().score(mate_score=10000)
-                            move_scores[move.uci()] = float(score)
-                else:
-                    pv = info.get("pv", [])
-                    if pv:
-                        move = pv[0]
-                        score = info["score"].white().score(mate_score=10000)
-                        move_scores[move.uci()] = float(score)
-                
-                # Show intermediate results
-                if current_depth == 1 or current_depth % 3 == 0 or current_depth == max_depth:
-                    print(f"[DEPTH {current_depth}] {len(move_scores)} moves evaluated")
+            for move in chess_moves:
+                try:
+                    board.push(move)
                     
-                    # Update UI with current results
-                    if move_scores:
-                        best_overall, best_score = self._score_moves(self.current_fen, self.current_legal_moves)
-                        turn = "white" if board.turn == chess.WHITE else "black"
-                        
-                        temp_qualities = {}
-                        for move, score in move_scores.items():
-                            cp_loss = abs(best_score - score)
-                            quality = MoveQuality.classify(cp_loss)
-                            temp_qualities[move] = quality
-                        
-                        # Update UI immediately
-                        await self._show_move_qualities(temp_qualities)
+                    limit = chess.engine.Limit(depth=depth)
+                    if self.search_time and depth == max_depth:
+                        limit = chess.engine.Limit(depth=depth, time=self.search_time)
+                    
+                    info = self.engine.analyse(board, limit)
+                    score = info["score"].white().score(mate_score=10000)
+                    move_scores[move.uci()] = float(score)
+                    
+                    board.pop()
+                except Exception as e:
+                    if board.move_stack:
+                        board.pop()
+                    continue
+            
+            # Update UI at each depth milestone
+            if move_scores and depth >= 3:
+                print(f"[DEPTH {depth}] {len(move_scores)} moves evaluated")
                 
-            except Exception as e:
-                print(f"[ERROR] Depth {current_depth} failed: {e}")
-                break
-        
-        # Reset MultiPV
-        try:
-            self.engine.configure({"MultiPV": 1})
-        except:
-            pass
+                best_overall, best_score = self._score_moves(self.current_fen, self.current_legal_moves)
+                turn = "white" if board.turn == chess.WHITE else "black"
+                
+                temp_qualities = {}
+                for move, score in move_scores.items():
+                    cp_loss = abs(best_score - score)
+                    quality = MoveQuality.classify(cp_loss)
+                    temp_qualities[move] = quality
+                
+                await self._show_move_qualities(temp_qualities)
         
         # Cache final results
         self.move_quality_cache[cache_key] = move_scores
@@ -690,6 +683,80 @@ class AdvancedAssistant:
         except Exception as e:
             print(f"[ERROR] Failed to show threats: {e}")
     
+    async def _sync_ui_settings(self):
+        """Sync settings from UI checkboxes."""
+        if not self.page:
+            return
+        
+        try:
+            settings = await self.page.evaluate("""
+                () => {
+                    return {
+                        autoPlay: document.getElementById('assist-auto-play')?.checked || false,
+                        showPlayer: document.getElementById('assist-show-player')?.checked || true,
+                        showOpponent: document.getElementById('assist-show-opponent')?.checked || false,
+                        showThreats: document.getElementById('assist-show-threats')?.checked || true,
+                        showBest: document.getElementById('assist-show-best')?.checked || true,
+                        showHeatmap: document.getElementById('assist-show-heatmap')?.checked || false,
+                        depth: parseInt(document.getElementById('assist-depth')?.value || '14'),
+                        time: parseFloat(document.getElementById('assist-time')?.value || '2.0')
+                    };
+                }
+            """)
+            
+            if settings:
+                if self.auto_play != settings['autoPlay']:
+                    self.auto_play = settings['autoPlay']
+                    print(f"[CONFIG] Auto-play: {self.auto_play}")
+                
+                self.show_for_player = settings['showPlayer']
+                self.show_for_opponent = settings['showOpponent']
+                if self.show_threats != settings['showThreats']:
+                    self.show_threats = settings['showThreats']
+                    if not self.show_threats:
+                        await self._clear_all_overlays()
+                if self.show_best_move != settings['showBest']:
+                    self.show_best_move = settings['showBest']
+                    if not self.show_best_move:
+                        await self._clear_all_overlays()
+                if self.show_move_quality != settings['showHeatmap']:
+                    self.show_move_quality = settings['showHeatmap']
+                    if not self.show_move_quality:
+                        await self._clear_all_overlays()
+                self.search_depth = settings['depth']
+                self.search_time = settings['time']
+        except Exception as e:
+            pass
+    
+    async def _check_piece_selection(self):
+        """Check if user selected a piece for analysis."""
+        if not self.page or not self.current_fen or not self.show_move_quality:
+            return
+        
+        try:
+            selected = await self.page.evaluate("""
+                () => {
+                    if (window.assistantGetSelectedSquare) {
+                        return window.assistantGetSelectedSquare();
+                    }
+                    return null;
+                }
+            """)
+            
+            if selected:
+                print(f"[PIECE] Selected: {selected}")
+                await self._analyze_selected_piece(selected)
+                # Clear the selection flag
+                await self.page.evaluate("""
+                    () => {
+                        if (window.assistantClearSelectedSquare) {
+                            window.assistantClearSelectedSquare();
+                        }
+                    }
+                """)
+        except Exception as e:
+            pass
+    
     async def _auto_play_move(self, uci_move: str):
         """Auto-play the best move."""
         if not self.page:
@@ -732,6 +799,7 @@ class AdvancedAssistant:
                     if (window.assistantClearAll) {
                         window.assistantClearAll();
                     }
+                    document.querySelectorAll('[data-assistant-arrow="true"]').forEach(el => el.remove());
                 }
             """)
             print(f"[CLEAR] Cleared all overlays")
@@ -741,7 +809,7 @@ class AdvancedAssistant:
     async def _handle_response(self, response):
         """Capture HTTP responses to detect game ID and player color."""
         url = response.url
-        if "/game" not in url and "/new_game" not in url:
+        if "/game?" not in url:
             return
         
         try:
@@ -779,6 +847,8 @@ class AdvancedAssistant:
                         if self.sio:
                             await self.sio.disconnect()
                             self.sio = None
+                        self.last_socket_failure = None
+                        self.socket_connecting = False
                     else:
                         print(f"[ASSIST] Detected game ID: {game_id}")
                     self.game_id = game_id
@@ -998,72 +1068,154 @@ class AdvancedAssistant:
     }});
   }};
   
+  // Helper to get edge point between two squares
+  const getEdgePoint = (fromRect, toRect) => {{
+    const fromCenterX = fromRect.left + fromRect.width / 2;
+    const fromCenterY = fromRect.top + fromRect.height / 2;
+    const toCenterX = toRect.left + toRect.width / 2;
+    const toCenterY = toRect.top + toRect.height / 2;
+    
+    const dx = toCenterX - fromCenterX;
+    const dy = toCenterY - fromCenterY;
+    const angle = Math.atan2(dy, dx);
+    
+    const offset = Math.min(fromRect.width, fromRect.height) * 0.35;
+    
+    return {{
+      x: fromCenterX + Math.cos(angle) * offset,
+      y: fromCenterY + Math.sin(angle) * offset
+    }};
+  }};
+  
+  // Draw arrow between two squares
+  const drawArrow = (fromSquare, toSquare, color, className) => {{
+    const fromEl = root.querySelector(`.square[data-square="${{fromSquare}}"]`);
+    const toEl = root.querySelector(`.square[data-square="${{toSquare}}"]`);
+    if (!fromEl || !toEl) return;
+    
+    const fromRect = fromEl.getBoundingClientRect();
+    const toRect = toEl.getBoundingClientRect();
+    
+    const from = getEdgePoint(fromRect, toRect);
+    const to = getEdgePoint(toRect, fromRect);
+    
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.className = className;
+    svg.dataset.assistantArrow = 'true';
+    svg.style.position = 'fixed';
+    svg.style.top = '0';
+    svg.style.left = '0';
+    svg.style.width = '100%';
+    svg.style.height = '100%';
+    svg.style.pointerEvents = 'none';
+    svg.style.zIndex = '9998';
+    
+    const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+    const markerId = 'arrow-' + color.replace('#', '') + '-' + Math.random();
+    const marker = document.createElementNS('http://www.w3.org/2000/svg', 'marker');
+    marker.setAttribute('id', markerId);
+    marker.setAttribute('markerWidth', '10');
+    marker.setAttribute('markerHeight', '10');
+    marker.setAttribute('refX', '5');
+    marker.setAttribute('refY', '5');
+    marker.setAttribute('orient', 'auto');
+    
+    const polygon = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+    polygon.setAttribute('points', '0 0, 10 5, 0 10');
+    polygon.setAttribute('fill', color);
+    marker.appendChild(polygon);
+    defs.appendChild(marker);
+    svg.appendChild(defs);
+    
+    const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    line.setAttribute('x1', from.x);
+    line.setAttribute('y1', from.y);
+    line.setAttribute('x2', to.x);
+    line.setAttribute('y2', to.y);
+    line.setAttribute('stroke', color);
+    line.setAttribute('stroke-width', '5');
+    line.setAttribute('marker-end', `url(#${{markerId}})`);
+    line.setAttribute('opacity', '0.8');
+    svg.appendChild(line);
+    
+    document.body.appendChild(svg);
+  }};
+  
   // Show threat arrows
   window.assistantShowThreats = (threats) => {{
     ensureSquareIds();
-    clearThreatArrows();
-    
-    const getSquareCenter = (squareName) => {{
-      const target = root.querySelector(`.square[data-square="${{squareName}}"]`);
-      if (!target) return null;
-      const rect = target.getBoundingClientRect();
-      return {{
-        x: rect.left + rect.width / 2,
-        y: rect.top + rect.height / 2
-      }};
-    }};
-    
     threats.forEach(threat => {{
-      const from = getSquareCenter(threat.from);
-      const to = getSquareCenter(threat.to);
-      if (!from || !to) return;
-      
-      const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-      svg.className = 'assistant-threat-arrow';
-      svg.style.position = 'fixed';
-      svg.style.top = '0';
-      svg.style.left = '0';
-      svg.style.width = '100%';
-      svg.style.height = '100%';
-      svg.style.pointerEvents = 'none';
-      
-      const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
-      const marker = document.createElementNS('http://www.w3.org/2000/svg', 'marker');
-      marker.setAttribute('id', 'threat-arrowhead-' + Math.random());
-      marker.setAttribute('markerWidth', '10');
-      marker.setAttribute('markerHeight', '7');
-      marker.setAttribute('refX', '1.9');
-      marker.setAttribute('refY', '1.9');
-      marker.setAttribute('orient', 'auto');
-      
-      const polygon = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
-      polygon.setAttribute('points', '0 0.3, 3 1.85, 0 3.5');
-      polygon.setAttribute('fill', 'red');
-      marker.appendChild(polygon);
-      defs.appendChild(marker);
-      svg.appendChild(defs);
-      
-      const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-      line.setAttribute('x1', from.x);
-      line.setAttribute('y1', from.y);
-      line.setAttribute('x2', to.x);
-      line.setAttribute('y2', to.y);
-      line.setAttribute('stroke', 'red');
-      line.setAttribute('stroke-width', '3');
-      line.setAttribute('marker-end', `url(#${{marker.id}})`);
-      line.setAttribute('opacity', '0.7');
-      svg.appendChild(line);
-      
-      document.body.appendChild(svg);
+      drawArrow(threat.from, threat.to, '#ff0000', 'assistant-threat-arrow');
     }});
+  }};
+  
+  // Show best move arrow
+  window.assistantShowBestArrow = (start, stop) => {{
+    ensureSquareIds();
+    drawArrow(start, stop, '#00ff00', 'assistant-best-arrow');
+  }};
+  
+  // Clear all arrows
+  window.assistantClearArrows = () => {{
+    document.querySelectorAll('.assistant-threat-arrow').forEach(el => el.remove());
+    document.querySelectorAll('.assistant-best-arrow').forEach(el => el.remove());
   }};
   
   // Clear all
   window.assistantClearAll = () => {{
     clearBestHighlight();
     clearQualityOverlays();
-    clearThreatArrows();
+    if (window.assistantClearArrows) {{
+      window.assistantClearArrows();
+    }}
   }};
+  
+  // Add click listener to clear overlays when moves are made
+  let lastPly = null;
+  const checkForMoveChange = () => {{
+    // This will be called periodically to detect when a move is made
+    // We clear overlays when the board changes
+  }};
+  
+  // Track selected piece for move quality analysis
+  let selectedSquare = null;
+  let pendingSelection = null;
+  
+  // Functions to get/clear selected square
+  window.assistantGetSelectedSquare = () => {{
+    const result = pendingSelection;
+    return result;
+  }};
+  
+  window.assistantClearSelectedSquare = () => {{
+    pendingSelection = null;
+  }};
+  
+  // Listen for clicks on squares
+  root.addEventListener('click', (e) => {{
+    const square = e.target.closest('.square');
+    if (!square || !square.dataset.square) return;
+    
+    const squareName = square.dataset.square;
+    const hasPiece = square.querySelector('[class*="piece"]') || square.querySelector('img');
+    
+    // If clicking a piece, mark for analysis
+    if (hasPiece && squareName !== selectedSquare) {{
+      selectedSquare = squareName;
+      pendingSelection = squareName;
+      console.log('[ASSIST] Piece selected:', squareName);
+    }} else {{
+      // Clicking empty square or same square - likely making a move
+      selectedSquare = null;
+      pendingSelection = null;
+      // Clear overlays after move animation
+      setTimeout(() => {{
+        if (window.assistantClearAll) {{
+          window.assistantClearAll();
+        }}
+      }}, 400);
+    }}
+  }});
   
   window.assistantAdvanced = true;
   console.log('ASSIST: Advanced overlay system ready');
@@ -1125,6 +1277,12 @@ class AdvancedAssistant:
     </div>
     <div style="margin-bottom: 8px;">
       <label><input type="checkbox" id="assist-show-best" checked> Best Move</label>
+    </div>
+    <div style="margin-bottom: 8px;">
+      <label><input type="checkbox" id="assist-show-heatmap"> Heatmap</label>
+    </div>
+    <div style="margin-bottom: 8px;">
+      <label><input type="checkbox" id="assist-auto-play"> Auto-Play</label>
     </div>
     <div style="margin-top: 12px; padding-top: 8px; border-top: 1px solid #555;">
       <div style="margin-bottom: 4px; font-size: 11px; color: #aaa;">Click piece to see move quality</div>
