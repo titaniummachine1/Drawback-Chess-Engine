@@ -1,0 +1,87 @@
+{
+  "AcceptChallengeDialog.js": {
+    "url": "https://www.drawbackchess.com/static/js/AcceptChallengeDialog.js",
+    "size": 898,
+    "path": "C:\\GitHubProjekty\\drawbackChessAi\\scraped_drawback_chess\\AcceptChallengeDialog.js"
+  },
+  "AddFriendDialog.js": {
+    "url": "https://www.drawbackchess.com/static/js/AddFriendDialog.js",
+    "size": 898,
+    "path": "C:\\GitHubProjekty\\drawbackChessAi\\scraped_drawback_chess\\AddFriendDialog.js"
+  },
+  "App.js": {
+    "url": "https://www.drawbackchess.com/static/js/App.js",
+    "size": 898,
+    "path": "C:\\GitHubProjekty\\drawbackChessAi\\scraped_drawback_chess\\App.js"
+  },
+  "ChessNotationText.js": {
+    "url": "https://www.drawbackchess.com/static/js/ChessNotationText.js",
+    "size": 898,
+    "path": "C:\\GitHubProjekty\\drawbackChessAi\\scraped_drawback_chess\\ChessNotationText.js"
+  },
+  "ChessPiece.js": {
+    "url": "https://www.drawbackchess.com/static/js/ChessPiece.js",
+    "size": 898,
+    "path": "C:\\GitHubProjekty\\drawbackChessAi\\scraped_drawback_chess\\ChessPiece.js"
+  },
+  "DrawbackGlossary.js": {
+    "url": "https://www.drawbackchess.com/static/js/DrawbackGlossary.js",
+    "size": 898,
+    "path": "C:\\GitHubProjekty\\drawbackChessAi\\scraped_drawback_chess\\DrawbackGlossary.js"
+  },
+  "EnrichedText.js": {
+    "url": "https://www.drawbackchess.com/static/js/EnrichedText.js",
+    "size": 898,
+    "path": "C:\\GitHubProjekty\\drawbackChessAi\\scraped_drawback_chess\\EnrichedText.js"
+  },
+  "ErrorBoundary.js": {
+    "url": "https://www.drawbackchess.com/static/js/ErrorBoundary.js",
+    "size": 898,
+    "path": "C:\\GitHubProjekty\\drawbackChessAi\\scraped_drawback_chess\\ErrorBoundary.js"
+  },
+  "GameOverDialog.js": {
+    "url": "https://www.drawbackchess.com/static/js/GameOverDialog.js",
+    "size": 898,
+    "path": "C:\\GitHubProjekty\\drawbackChessAi\\scraped_drawback_chess\\GameOverDialog.js"
+  },
+  "GamePage.js": {
+    "url": "https://www.drawbackchess.com/static/js/GamePage.js",
+    "size": 898,
+    "path": "C:\\GitHubProjekty\\drawbackChessAi\\scraped_drawback_chess\\GamePage.js"
+  },
+  "GeneratorPage.js": {
+    "url": "https://www.drawbackchess.com/static/js/GeneratorPage.js",
+    "size": 898,
+    "path": "C:\\GitHubProjekty\\drawbackChessAi\\scraped_drawback_chess\\GeneratorPage.js"
+  },
+  "Helpers.js": {
+    "url": "https://www.drawbackchess.com/static/js/Helpers.js",
+    "size": 898,
+    "path": "C:\\GitHubProjekty\\drawbackChessAi\\scraped_drawback_chess\\Helpers.js"
+  },
+  "HostGameDialog.js": {
+    "url": "https://www.drawbackchess.com/static/js/HostGameDialog.js",
+    "size": 898,
+    "path": "C:\\GitHubProjekty\\drawbackChessAi\\scraped_drawback_chess\\HostGameDialog.js"
+  },
+  "HowToPlayDialog.js": {
+    "url": "https://www.drawbackchess.com/static/js/HowToPlayDialog.js",
+    "size": 898,
+    "path": "C:\\GitHubProjekty\\drawbackChessAi\\scraped_drawback_chess\\HowToPlayDialog.js"
+  },
+  "LandingPage.js": {
+    "url": "https://www.drawbackchess.com/static/js/LandingPage.js",
+    "size": 898,
+    "path": "C:\\GitHubProjekty\\drawbackChessAi\\scraped_drawback_chess\\LandingPage.js"
+  },
+  "LeaderboardPage.js": {
+    "url": "https://www.drawbackchess.com/static/js/LeaderboardPage.js",
+    "size": 898,
+    "path": "C:\\GitHubProjekty\\drawbackChessAi\\scraped_drawback_chess\\LeaderboardPage.js"
+  },
+  "main.fed58aff.js": {
+    "url": "https://www.drawbackchess.com/static/js/main.fed58aff.js",
+    "size": 614297,
+    "path": "C:\\GitHubProjekty\\drawbackChessAi\\scraped_drawback_chess\\main.fed58aff.js"
+  }
+}

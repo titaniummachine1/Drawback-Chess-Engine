@@ -1,0 +1,162 @@
+{
+  "AcceptChallengeDialog.js": {
+    "original": "AcceptChallengeDialog.js",
+    "size": 2752,
+    "lines": 77
+  },
+  "AddFriendDialog.js": {
+    "original": "AddFriendDialog.js",
+    "size": 4608,
+    "lines": 148
+  },
+  "App.js": {
+    "original": "App.js",
+    "size": 2360,
+    "lines": 74
+  },
+  "ChessNotationText.js": {
+    "original": "ChessNotationText.js",
+    "size": 1422,
+    "lines": 32
+  },
+  "ChessPiece.js": {
+    "original": "ChessPiece.js",
+    "size": 2502,
+    "lines": 81
+  },
+  "DrawbackGlossary.js": {
+    "original": "DrawbackGlossary.js",
+    "size": 18848,
+    "lines": 487
+  },
+  "EnrichedText.js": {
+    "original": "EnrichedText.js",
+    "size": 2635,
+    "lines": 72
+  },
+  "ErrorBoundary.js": {
+    "original": "ErrorBoundary.js",
+    "size": 1433,
+    "lines": 49
+  },
+  "GameOverDialog.js": {
+    "original": "GameOverDialog.js",
+    "size": 11252,
+    "lines": 262
+  },
+  "GamePage.js": {
+    "original": "GamePage.js",
+    "size": 76811,
+    "lines": 1863
+  },
+  "GeneratorPage.js": {
+    "original": "GeneratorPage.js",
+    "size": 3872,
+    "lines": 91
+  },
+  "Helpers.js": {
+    "original": "Helpers.js",
+    "size": 4600,
+    "lines": 164
+  },
+  "HostGameDialog.js": {
+    "original": "HostGameDialog.js",
+    "size": 10976,
+    "lines": 229
+  },
+  "HowToPlayDialog.js": {
+    "original": "HowToPlayDialog.js",
+    "size": 4010,
+    "lines": 61
+  },
+  "index.js": {
+    "original": "index.js",
+    "size": 541,
+    "lines": 18
+  },
+  "LandingPage.js": {
+    "original": "LandingPage.js",
+    "size": 41000,
+    "lines": 868
+  },
+  "LeaderboardPage.js": {
+    "original": "LeaderboardPage.js",
+    "size": 2949,
+    "lines": 70
+  },
+  "MatchHistoryPage.js": {
+    "original": "MatchHistoryPage.js",
+    "size": 13023,
+    "lines": 331
+  },
+  "MaterialIndicator.js": {
+    "original": "MaterialIndicator.js",
+    "size": 1151,
+    "lines": 31
+  },
+  "MissingPage.js": {
+    "original": "MissingPage.js",
+    "size": 385,
+    "lines": 13
+  },
+  "NullErrorBoundary.js": {
+    "original": "NullErrorBoundary.js",
+    "size": 740,
+    "lines": 30
+  },
+  "PlayerInfo.js": {
+    "original": "PlayerInfo.js",
+    "size": 18403,
+    "lines": 415
+  },
+  "PlayVsFriendDialog.js": {
+    "original": "PlayVsFriendDialog.js",
+    "size": 4480,
+    "lines": 128
+  },
+  "RejoinQueuePage.js": {
+    "original": "RejoinQueuePage.js",
+    "size": 1857,
+    "lines": 54
+  },
+  "reportWebVitals.js": {
+    "original": "reportWebVitals.js",
+    "size": 362,
+    "lines": 14
+  },
+  "SeedEloDialog.js": {
+    "original": "SeedEloDialog.js",
+    "size": 4475,
+    "lines": 102
+  },
+  "Settings.js": {
+    "original": "Settings.js",
+    "size": 162,
+    "lines": 3
+  },
+  "SettingsDialog.js": {
+    "original": "SettingsDialog.js",
+    "size": 5615,
+    "lines": 161
+  },
+  "Square.js": {
+    "original": "Square.js",
+    "size": 25833,
+    "lines": 662
+  },
+  "StaticBoard.js": {
+    "original": "StaticBoard.js",
+    "size": 2133,
+    "lines": 82
+  },
+  "Timer.js": {
+    "original": "Timer.js",
+    "size": 4479,
+    "lines": 125
+  },
+  "Toast.js": {
+    "original": "Toast.js",
+    "size": 463,
+    "lines": 18
+  }
+}

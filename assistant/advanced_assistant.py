@@ -149,6 +149,11 @@ class AdvancedAssistant:
         self.search_depth = 14
         self.search_time = 2.0  # Default 2 seconds
         
+        # Auto-play tracking to prevent duplicate submissions
+        self.last_played_move = None
+        self.last_played_ply = -1
+        self.auto_queue = False
+        
         # Caching
         self.move_cache = {}
         self.move_quality_cache = {}
@@ -168,15 +173,20 @@ class AdvancedAssistant:
     async def run(self, url: str) -> None:
         async with async_playwright() as playwright:
             self.playwright = playwright
-            self.browser = await playwright.chromium.launch(
+            
+            # Use persistent context to save cookies and login state
+            user_data_dir = REPO_ROOT / "assistant" / "browser_data"
+            user_data_dir.mkdir(exist_ok=True)
+            
+            context = await playwright.chromium.launch_persistent_context(
+                str(user_data_dir),
                 headless=False,
-                args=['--start-maximized']
-            )
-            context = await self.browser.new_context(
+                args=['--start-maximized'],
                 viewport=None,
                 no_viewport=True
             )
-            self.page = await context.new_page()
+            self.browser = context
+            self.page = context.pages[0] if context.pages else await context.new_page()
             
             self.page.on("response", lambda res: asyncio.create_task(self._handle_response(res)))
             self.page.on("close", lambda: asyncio.create_task(self._handle_page_close()))
@@ -379,6 +389,7 @@ class AdvancedAssistant:
         
         self.current_legal_moves = legal_moves
         self.current_fen = fen
+        self.current_ply = data.get('ply', 0)
         
         # Clear old overlays when position changes
         await self._clear_all_overlays()
@@ -800,6 +811,10 @@ class AdvancedAssistant:
             if settings.get('time') is not None and self.search_time != settings['time']:
                 self.search_time = settings['time']
                 settings_changed = True
+            if settings.get('autoQueue') is not None and self.auto_queue != settings['autoQueue']:
+                self.auto_queue = settings['autoQueue']
+                print(f"[CONFIG] Auto-queue: {self.auto_queue}")
+                settings_changed = True
                 
             # Save settings to file whenever they change
             if settings_changed:
@@ -916,7 +931,11 @@ class AdvancedAssistant:
     async def _auto_play_move(self, uci_move: str):
         """Auto-play the best move via HTTP POST to /move endpoint."""
         if not self.page or not self.game_id or not self.username or not self.player_color or not self.port:
-            print(f"[AUTO-PLAY] Missing required data for move submission")
+            return
+        
+        # Prevent duplicate submissions - check if we already played this move at this ply
+        current_ply = getattr(self, 'current_ply', 0)
+        if self.last_played_move == uci_move and self.last_played_ply == current_ply:
             return
         
         start = uci_move[:2].upper()
@@ -950,10 +969,14 @@ class AdvancedAssistant:
                 result = await response.json()
                 if result.get('success'):
                     print(f"[AUTO-PLAY] Move submitted successfully")
+                    # Mark this move as played to prevent re-submission
+                    self.last_played_move = uci_move
+                    self.last_played_ply = current_ply
                 else:
                     error_msg = result.get('error', 'Unknown error')
-                    print(f"[AUTO-PLAY] Move rejected: {error_msg}")
-                    print(f"[DEBUG] Full response: {result}")
+                    if error_msg:  # Only log if there's an actual error
+                        print(f"[AUTO-PLAY] Move rejected: {error_msg}")
+                        print(f"[DEBUG] Full response: {result}")
             else:
                 print(f"[AUTO-PLAY] HTTP error: {response.status}")
                 text = await response.text()
@@ -1223,7 +1246,7 @@ class AdvancedAssistant:
       overflow: hidden;
       display: flex;
       flex-direction: column-reverse;
-      z-index: 10001;
+      z-index: 999999 !important;
     }}
 
     #assistant-eval-bar-fill {{
@@ -1590,6 +1613,9 @@ class AdvancedAssistant:
     <div style="margin-bottom: 8px;">
       <label><input type="checkbox" id="assist-auto-play"> Auto-Play</label>
     </div>
+    <div style="margin-bottom: 8px;">
+      <label><input type="checkbox" id="assist-auto-queue"> Auto-Queue</label>
+    </div>
     <div style="margin-top: 12px; padding-top: 8px; border-top: 1px solid #555;">
       <div style="margin-bottom: 4px; font-size: 11px; color: #aaa;">Click piece to see move quality</div>
     </div>
@@ -1616,6 +1642,21 @@ class AdvancedAssistant:
   document.getElementById('assist-time').addEventListener('input', (e) => {
     document.getElementById('time-value').textContent = e.target.value;
   });
+  
+  // Function to get current settings
+  window.assistantGetSettings = () => {
+    return {
+      showPlayer: document.getElementById('assist-show-player').checked,
+      showOpponent: document.getElementById('assist-show-opponent').checked,
+      showThreats: document.getElementById('assist-show-threats').checked,
+      showBest: document.getElementById('assist-show-best').checked,
+      showHeatmap: document.getElementById('assist-show-heatmap').checked,
+      autoPlay: document.getElementById('assist-auto-play').checked,
+      autoQueue: document.getElementById('assist-auto-queue').checked,
+      depth: parseInt(document.getElementById('assist-depth').value),
+      time: parseFloat(document.getElementById('assist-time').value)
+    };
+  };
   
   window.assistantUIPanel = true;
   console.log('ASSIST: UI panel ready');

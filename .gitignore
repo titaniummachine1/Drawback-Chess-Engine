@@ -52,8 +52,13 @@ logs/
 # Data
 data/
 *.csv
-*.json
 games/
+
+# Browser data (cookies, login state) - exclude from git for security
+assistant/browser_data/
+
+# Settings file - keep local only
+assistant/settings.json
 
 # Temporary files
 tmp/
