@@ -951,9 +951,13 @@ class AdvancedAssistant:
                 if result.get('success'):
                     print(f"[AUTO-PLAY] Move submitted successfully")
                 else:
-                    print(f"[AUTO-PLAY] Move rejected: {result.get('error', 'Unknown error')}")
+                    error_msg = result.get('error', 'Unknown error')
+                    print(f"[AUTO-PLAY] Move rejected: {error_msg}")
+                    print(f"[DEBUG] Full response: {result}")
             else:
                 print(f"[AUTO-PLAY] HTTP error: {response.status}")
+                text = await response.text()
+                print(f"[DEBUG] Response body: {text}")
                 
         except Exception as e:
             print(f"[ERROR] Auto-play failed: {e}")
@@ -1132,18 +1136,31 @@ class AdvancedAssistant:
             if is_now_injected:
                 print(f"[ASSIST] Advanced overlay injected successfully")
             else:
-                print(f"[WARN] Overlay injection may have failed - flag not set")
+                # Check for JS errors
+                console_errors = await page.evaluate("""
+                    () => {
+                        return window.__assistantErrors || 'No errors captured';
+                    }
+                """)
+                print(f"[ERROR] Overlay injection failed - flag not set")
+                print(f"[DEBUG] Console errors: {console_errors}")
         except Exception as e:
-            print(f"[WARN] Failed to inject overlay: {e}")
+            print(f"[ERROR] Failed to inject overlay: {e}")
+            import traceback
+            traceback.print_exc()
     
     def _get_overlay_javascript(self, board_selector: str) -> str:
         """Generate JavaScript for advanced overlay system."""
         return f"""
 (() => {{
-  if (window.assistantAdvanced) return;
-  
-  const root = document.querySelector('{board_selector}');
-  if (!root) return;
+  try {{
+    if (window.assistantAdvanced) return;
+    
+    const root = document.querySelector('{board_selector}');
+    if (!root) {{
+      console.error('[ASSIST] Board root not found');
+      return;
+    }}
   
   // Ensure square IDs
   const ensureSquareIds = () => {{
@@ -1439,6 +1456,8 @@ class AdvancedAssistant:
     }});
   }};
   
+  // Clear arrows
+  window.assistantClearArrows = () => {{
     document.querySelectorAll('.assistant-threat-arrow').forEach(el => el.remove());
     document.querySelectorAll('.assistant-best-arrow').forEach(el => el.remove());
   }};
@@ -1501,6 +1520,10 @@ class AdvancedAssistant:
   
   window.assistantAdvanced = true;
   console.log('ASSIST: Advanced overlay system ready');
+  }} catch (err) {{
+    console.error('[ASSIST] Overlay injection error:', err);
+    window.__assistantErrors = err.message + ' | ' + err.stack;
+  }}
 }})();
 """
     
