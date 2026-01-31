@@ -191,6 +191,9 @@ class AdvancedAssistant:
             self.page.on("response", lambda res: asyncio.create_task(self._handle_response(res)))
             self.page.on("close", lambda: asyncio.create_task(self._handle_page_close()))
             
+            # Add console listener to catch JavaScript errors
+            self.page.on("console", lambda msg: print(f"[BROWSER] {msg.type}: {msg.text}") if msg.type in ["error", "warning"] else None)
+            
             print(f"[ASSIST] Navigating to {url}")
             await self.page.goto(url)
             
@@ -227,6 +230,10 @@ class AdvancedAssistant:
                     
                     # Update settings from UI
                     await self._sync_ui_settings()
+                    
+                    # Auto-queue if enabled and not in a game
+                    if self.auto_queue and not self.game_id:
+                        await self._auto_join_queue()
                     
                     await asyncio.sleep(0.5)
             except asyncio.CancelledError:
@@ -418,9 +425,6 @@ class AdvancedAssistant:
         
         print(f"[ASSIST] Best move: {best_move} ({best_score:.2f} cp)")
         
-        # Update eval bar
-        await self._update_eval_bar(best_score, turn)
-        
         # 2. Detect threats (cached)
         threats = await self._detect_threats(fen, turn)
         self.current_threats = threats
@@ -429,12 +433,34 @@ class AdvancedAssistant:
         if self.show_best_move:
             await self._highlight_best_move(best_move, best_score)
         
-        if self.show_threats and threats:
-            await self._show_threats(threats)
+        # Always show threats when enabled, regardless of whose turn it is
+        if threats:
+            try:
+                show_threats_enabled = await self.page.evaluate("""
+                    () => {
+                        const checkbox = document.getElementById('assist-show-threats');
+                        return checkbox ? checkbox.checked : true;
+                    }
+                """)
+                if show_threats_enabled:
+                    await self._show_threats(threats)
+            except:
+                pass
         
-        # Auto-play if enabled
-        if self.auto_play and best_move:
-            await self._auto_play_move(best_move)
+        # Auto-play if enabled - ONLY when checkbox is checked
+        # Check the actual UI state to prevent permanent auto-play
+        if best_move:
+            try:
+                auto_play_enabled = await self.page.evaluate("""
+                    () => {
+                        const checkbox = document.getElementById('assist-auto-play');
+                        return checkbox ? checkbox.checked : false;
+                    }
+                """)
+                if auto_play_enabled:
+                    await self._auto_play_move(best_move)
+            except:
+                pass
         
         # 4. Log analysis
         parsed = PacketParser.parse_game_state({'game': {'board': board_state, 'turn': turn, 'ply': 0}, 'success': True})
@@ -453,21 +479,6 @@ class AdvancedAssistant:
                 continue
         return None
 
-    async def _update_eval_bar(self, score: float, turn: str):
-        """Update the visual eval bar on the page."""
-        if not self.page:
-            return
-        
-        # Convert score to percentage (0-100) where 50 is even
-        # Cap at +/- 1000cp (10 points)
-        capped_score = max(-1000, min(1000, score))
-        percentage = 50 + (capped_score / 20) # 1000cp -> 100%, -1000cp -> 0%
-        
-        # If it's black's turn to move, score is from white's perspective usually
-        # but our _score_moves uses white().score()
-        
-        await self.page.evaluate(f"if(window.assistantUpdateEval) window.assistantUpdateEval({percentage}, {score});")
-    
     async def _analyze_selected_piece(self, square: str):
         """Analyze moves for a specific piece with progressive deepening."""
         if not self.current_fen or not self.current_legal_moves:
@@ -985,6 +996,70 @@ class AdvancedAssistant:
         except Exception as e:
             print(f"[ERROR] Auto-play failed: {e}")
     
+    async def _auto_join_queue(self):
+        """Automatically join the matchmaking queue."""
+        if not self.page or not self.username:
+            return
+        
+        try:
+            # Check if we're already in queue or in a game
+            current_url = self.page.url
+            if '/game/' in current_url or '/rejoin_queue' in current_url:
+                return
+            
+            # Check if already queued by looking for queue timer or button state
+            is_queued = await self.page.evaluate("""
+                () => {
+                    // Check if "Leave Queue" button exists (means we're already in queue)
+                    const leaveBtn = Array.from(document.querySelectorAll('button'))
+                        .find(btn => btn.textContent.includes('Leave Queue'));
+                    return !!leaveBtn;
+                }
+            """)
+            
+            if is_queued:
+                return
+            
+            # Get time preference from localStorage (if set)
+            time_preference = await self.page.evaluate("""
+                () => {
+                    let pref = localStorage.getItem('time-preference');
+                    if (pref === 'any') return null;
+                    return pref;
+                }
+            """)
+            
+            time_preference_is_strong = await self.page.evaluate("""
+                () => localStorage.getItem('time-preference-is-strong') === 'true'
+            """)
+            
+            # Submit queue join request
+            payload = {
+                'username': self.username,
+                'timePreference': time_preference,
+                'timePreferenceIsStrong': time_preference_is_strong
+            }
+            
+            url = "https://www.drawbackchess.com/join_queue"
+            response = await self.page.request.post(
+                url,
+                data=json.dumps(payload),
+                headers={'Content-Type': 'application/json'}
+            )
+            
+            if response.ok:
+                result = await response.json()
+                if result.get('success') or result.get('error') == 'Already in queue':
+                    print(f"[AUTO-QUEUE] Joined matchmaking queue")
+                else:
+                    error = result.get('error', 'Unknown error')
+                    if error and error != 'Already in queue':
+                        print(f"[AUTO-QUEUE] Failed to join queue: {error}")
+            
+        except Exception as e:
+            # Silently fail - queue joining is not critical
+            pass
+    
     async def _clear_all_overlays(self):
         """Clear all visual overlays."""
         if not self.page:
@@ -1151,13 +1226,15 @@ class AdvancedAssistant:
         js_code = self._get_overlay_javascript(board_selector)
         
         try:
+            # Inject the script
             await page.add_script_tag(content=js_code)
-            # Wait a moment for script to execute
-            await asyncio.sleep(0.1)
+            # Wait for script to execute
+            await asyncio.sleep(0.2)
+            
             # Verify injection worked
             is_now_injected = await page.evaluate("() => !!window.assistantAdvanced")
             if is_now_injected:
-                print(f"[ASSIST] Advanced overlay injected successfully")
+                print(f"[OVERLAY] Successfully injected")
             else:
                 # Check for JS errors
                 console_errors = await page.evaluate("""
@@ -1166,7 +1243,9 @@ class AdvancedAssistant:
                     }
                 """)
                 print(f"[ERROR] Overlay injection failed - flag not set")
-                print(f"[DEBUG] Console errors: {console_errors}")
+                print(f"[ERROR] JS errors: {console_errors}")
+                # Try to get console logs
+                print(f"[DEBUG] Attempting to diagnose overlay failure...")
         except Exception as e:
             print(f"[ERROR] Failed to inject overlay: {e}")
             import traceback
@@ -1233,75 +1312,8 @@ class AdvancedAssistant:
       pointer-events: none;
       z-index: 9998;
     }}
-
-    #assistant-eval-bar-container {{
-      position: absolute;
-      left: -40px;
-      top: 0;
-      bottom: 0;
-      width: 30px;
-      background: #403d39;
-      border: 2px solid #2b2925;
-      border-radius: 4px;
-      overflow: hidden;
-      display: flex;
-      flex-direction: column-reverse;
-      z-index: 999999 !important;
-    }}
-
-    #assistant-eval-bar-fill {{
-      width: 100%;
-      height: 50%;
-      background: #ffffff;
-      transition: height 0.5s ease-in-out;
-    }}
-
-    .assistant-eval-text {{
-      position: absolute;
-      left: 50%;
-      transform: translateX(-50%);
-      font-size: 10px;
-      font-weight: bold;
-      color: #000;
-      z-index: 10002;
-      pointer-events: none;
-    }}
   `;
   document.head.appendChild(style);
-
-  // Add eval bar to board root
-  const injectEvalBar = () => {{
-    if (document.getElementById('assistant-eval-bar-container')) return;
-    const container = document.createElement('div');
-    container.id = 'assistant-eval-bar-container';
-    
-    const fill = document.createElement('div');
-    fill.id = 'assistant-eval-bar-fill';
-    
-    const text = document.createElement('div');
-    text.className = 'assistant-eval-text';
-    text.id = 'assistant-eval-text-val';
-    text.style.bottom = '10px';
-    text.textContent = '0.0';
-    
-    container.appendChild(fill);
-    container.appendChild(text);
-    root.appendChild(container);
-  }};
-  
-  injectEvalBar();
-
-  window.assistantUpdateEval = (percentage, score) => {{
-    const fill = document.getElementById('assistant-eval-bar-fill');
-    const text = document.getElementById('assistant-eval-text-val');
-    if (fill) fill.style.height = percentage + '%';
-    if (text) {{
-      text.textContent = (score / 100).toFixed(1);
-      text.style.color = percentage > 50 ? '#000' : '#fff';
-      text.style.bottom = percentage > 50 ? '10px' : 'auto';
-      text.style.top = percentage <= 50 ? '10px' : 'auto';
-    }}
-  }};
 
   // Clear functions
   const clearBestHighlight = () => {{
